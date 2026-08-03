@@ -13,7 +13,7 @@ public final class AppProcessCommandTest {
                 "one two");
 
         assertTrue(command.contains(
-                "pm path com.linedex.desktop"));
+                "pm path " + BuildConfig.APPLICATION_ID));
         assertTrue(command.contains(
                 "CLASSPATH=\"$APK\" /system/bin/app_process / "
                         + "com.linedex.desktop.TestCommand one two"));

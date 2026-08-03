@@ -13,12 +13,12 @@ public final class TaskControlCommandTest {
     }
 
     @Test
-    public void appAndRootUseTheMagicDeskPackage() {
+    public void appAndRootUseCurrentApplicationId() {
         assertEquals(
-                "com.linedex.desktop",
+                BuildConfig.APPLICATION_ID,
                 TaskControlCommand.callingPackageForUid(0));
         assertEquals(
-                "com.linedex.desktop",
+                BuildConfig.APPLICATION_ID,
                 TaskControlCommand.callingPackageForUid(10615));
     }
 }
