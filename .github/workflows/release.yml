@@ -12,10 +12,6 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/29.0.14206865
 
     steps:
       - name: Check out source
@@ -28,20 +24,39 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Install Android SDK components
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-37
+            build-tools;37.0.0
+            ndk;29.0.14206865
+          log-accepted-android-sdk-licenses: false
+
+      - name: Verify Android toolchain
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
-            "platforms;android-37" \
-            "build-tools;37.0.0" \
-            "ndk;29.0.14206865"
+          set -euo pipefail
+          command -v sdkmanager
+          sdkmanager --version
+          test -n "${ANDROID_SDK_ROOT:-}"
+
+          ndk_home="$ANDROID_SDK_ROOT/ndk/29.0.14206865"
+          echo "ANDROID_NDK_HOME=$ndk_home" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ndk_home" >> "$GITHUB_ENV"
+
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar"
+          test -x "$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2"
+          test -x "$ANDROID_SDK_ROOT/build-tools/37.0.0/apksigner"
+          test -x "$ndk_home/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android36-clang"
 
       - name: Restore release keystore
         shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.LINEDEX_RELEASE_KEYSTORE_BASE64 }}
         run: |
+          set -euo pipefail
           test -n "$KEYSTORE_BASE64"
           install -d -m 700 "$RUNNER_TEMP/linedex-signing"
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode \
@@ -54,7 +69,9 @@ jobs:
           ORG_GRADLE_PROJECT_LINEDEX_RELEASE_STORE_PASSWORD: ${{ secrets.LINEDEX_RELEASE_STORE_PASSWORD }}
           ORG_GRADLE_PROJECT_LINEDEX_RELEASE_KEY_ALIAS: ${{ secrets.LINEDEX_RELEASE_KEY_ALIAS }}
           ORG_GRADLE_PROJECT_LINEDEX_RELEASE_KEY_PASSWORD: ${{ secrets.LINEDEX_RELEASE_KEY_PASSWORD }}
+        shell: bash
         run: |
+          set -euo pipefail
           ./gradlew --no-daemon \
             :app:testReleaseUnitTest \
             :app:lintRelease \
@@ -63,20 +80,23 @@ jobs:
       - name: Verify and prepare files
         shell: bash
         run: |
+          set -euo pipefail
           build_tools="$ANDROID_SDK_ROOT/build-tools/37.0.0"
-          apk=app/build/outputs/apk/release/app-release.apk
+          apk="app/build/outputs/apk/release/app-release.apk"
           "$build_tools/apksigner" verify --verbose "$apk"
           ./scripts/verify-apks.sh "$apk"
+
           version="${GITHUB_REF_NAME#v}"
           if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
             version="manual-${GITHUB_RUN_NUMBER}"
           fi
+
           mkdir -p dist
           cp "$apk" "dist/LineDEX-${version}.apk"
           (cd dist && sha256sum ./*.apk > SHA256SUMS)
 
       - name: Upload signed artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: LineDEX-signed
           if-no-files-found: error
@@ -89,6 +109,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          set -euo pipefail
           gh release create "$GITHUB_REF_NAME" \
             --verify-tag \
             --generate-notes \

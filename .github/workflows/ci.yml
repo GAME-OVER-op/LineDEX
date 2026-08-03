@@ -13,10 +13,6 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/29.0.14206865
 
     steps:
       - name: Check out source
@@ -29,17 +25,31 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Install Android SDK components
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-37
+            build-tools;37.0.0
+            ndk;29.0.14206865
+          log-accepted-android-sdk-licenses: false
+
+      - name: Verify Android toolchain
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
-            "platforms;android-37" \
-            "build-tools;37.0.0" \
-            "ndk;29.0.14206865"
+          set -euo pipefail
+          command -v sdkmanager
+          sdkmanager --version
+          test -n "${ANDROID_SDK_ROOT:-}"
+
+          ndk_home="$ANDROID_SDK_ROOT/ndk/29.0.14206865"
+          echo "ANDROID_NDK_HOME=$ndk_home" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ndk_home" >> "$GITHUB_ENV"
+
           test -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar"
           test -x "$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2"
-          test -x "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android36-clang"
+          test -x "$ndk_home/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android36-clang"
 
       - name: Restore optional stable development keystore
         shell: bash
@@ -49,10 +59,12 @@ jobs:
           KEY_ALIAS: ${{ secrets.LINEDEX_DEV_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.LINEDEX_DEV_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
           if [[ -z "$KEYSTORE_BASE64" ]]; then
             echo "No stable development key configured; using Gradle debug signing."
             exit 0
           fi
+
           test -n "$STORE_PASSWORD"
           test -n "$KEY_ALIAS"
           test -n "$KEY_PASSWORD"
@@ -69,22 +81,25 @@ jobs:
           } >> "$HOME/.gradle/gradle.properties"
 
       - name: Unit tests, lint and dev release
+        shell: bash
         run: |
+          set -euo pipefail
           ./gradlew --no-daemon \
             :app:testDevReleaseUnitTest \
             :app:lintDevRelease \
             :app:assembleDevRelease
 
       - name: Verify APK contents
+        shell: bash
         run: |
-          ./scripts/verify-apks.sh \
-            app/build/outputs/apk/devRelease/app-devRelease.apk
-          unzip -p app/build/outputs/apk/devRelease/app-devRelease.apk \
-            assets/xposed_init \
+          set -euo pipefail
+          apk="app/build/outputs/apk/devRelease/app-devRelease.apk"
+          ./scripts/verify-apks.sh "$apk"
+          unzip -p "$apk" assets/xposed_init \
             | grep -qx 'com.linedex.desktop.xposed.LineDexXposedEntry'
 
       - name: Upload dev release
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: LineDEX-devRelease
           if-no-files-found: error

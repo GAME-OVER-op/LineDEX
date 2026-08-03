@@ -1,5 +1,13 @@
 # Changelog
 
+
+## CI maintenance
+
+- Install Android command-line tools before invoking `sdkmanager`.
+- Provision platform 37, build-tools 37.0.0 and NDK 29 through `android-actions/setup-android@v4`.
+- Move GitHub-hosted actions to Node 24-compatible major versions.
+- Derive Android SDK and NDK paths from the setup action instead of hard-coding runner paths.
+
 ## 0.1.0-alpha01
 
 - Initial LineDEX source release.
