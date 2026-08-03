@@ -30,8 +30,8 @@ jobs:
         with:
           packages: >-
             platform-tools
-            platforms;android-37
-            build-tools;37.0.0
+            platforms;android-36
+            build-tools;36.0.0
             ndk;29.0.14206865
           log-accepted-android-sdk-licenses: false
 
@@ -47,8 +47,8 @@ jobs:
           echo "ANDROID_NDK_HOME=$ndk_home" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$ndk_home" >> "$GITHUB_ENV"
 
-          test -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar"
-          test -x "$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2"
+          test -f "$ANDROID_SDK_ROOT/platforms/android-36/android.jar"
+          test -x "$ANDROID_SDK_ROOT/build-tools/36.0.0/aapt2"
           test -x "$ndk_home/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android36-clang"
 
       - name: Restore optional stable development keystore

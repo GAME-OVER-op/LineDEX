@@ -43,8 +43,8 @@ Then reboot. Open LineDEX on the phone, grant Shizuku access, prepare Android fr
 Requirements:
 
 - JDK 17
-- Android SDK platform 37 (compile SDK)
-- Android build-tools 37.0.0
+- Android SDK platform 36 (compile SDK)
+- Android build-tools 36.0.0
 - Android 16 target SDK 36
 - Android NDK `29.0.14206865`
 
