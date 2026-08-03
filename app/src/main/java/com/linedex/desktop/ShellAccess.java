@@ -577,7 +577,7 @@ final class ShellAccess {
             String error = "";
             boolean success = false;
             try {
-                run(command.toString());
+                ShellAccess.run(command.toString());
                 count = taskIds.length;
                 success = true;
             } catch (IOException failure) {
@@ -601,7 +601,7 @@ final class ShellAccess {
             String previous = "";
             try {
                 while (!mClosed.get()) {
-                    final String current = run(
+                    final String current = ShellAccess.run(
                             "/system/bin/dumpsys activity activities 2>/dev/null | "
                                     + "/system/bin/grep -E "
                                     + "'Task\\{|mResumedActivity|mFocusedApp|mTopResumedActivity' "

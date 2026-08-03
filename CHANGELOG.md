@@ -2,6 +2,8 @@
 
 ## 0.1.0-alpha02
 
+- Fixed `TaskObserverHandle` compilation by explicitly calling `ShellAccess.run(String)` from the nested `Runnable`.
+
 - Removed the Shizuku dependency, provider, UserService and AIDL command service.
 - Replaced privileged app commands with a root-only `su -c` backend for settings, tasks, native helpers and diagnostics.
 - Fixed the desktop switch crash by moving Settings writes out of the app-originated `system_server` Binder call.
