@@ -18,6 +18,8 @@ import com.linedex.desktop.LineDexSessionCoordinator;
  * The system bridge Binder is delivered back through this endpoint.
  */
 public final class LineDexBridgeService extends Service {
+    public static final String ACTION_BIND_SYSTEM_BRIDGE =
+            "com.linedex.desktop.action.BIND_SYSTEM_BRIDGE";
     private static final String TAG = "LineDexBridgeService";
     private final Handler mMain = new Handler(Looper.getMainLooper());
     private volatile ILineDexSystemBridge mSystemBridge;
@@ -91,9 +93,9 @@ public final class LineDexBridgeService extends Service {
 
     @Override
     public IBinder onBind(final Intent intent) {
-        final int caller = Binder.getCallingUid();
-        if (caller != Process.SYSTEM_UID && caller != Process.myUid()) {
-            Log.w(TAG, "Rejected bridge bind from uid=" + caller);
+        if (intent == null
+                || !ACTION_BIND_SYSTEM_BRIDGE.equals(intent.getAction())) {
+            Log.w(TAG, "Rejected bridge bind with unexpected action");
             return null;
         }
         return mEndpoint;

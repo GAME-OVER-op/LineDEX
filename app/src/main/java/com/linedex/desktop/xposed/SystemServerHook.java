@@ -168,7 +168,8 @@ final class SystemServerHook {
             }
         };
         bindAttempt[0] = () -> {
-            final Intent intent = new Intent();
+            final Intent intent = new Intent(
+                    LineDexBridgeService.ACTION_BIND_SYSTEM_BRIDGE);
             intent.setComponent(new ComponentName(PACKAGE_NAME, BRIDGE_SERVICE));
             try {
                 final boolean bound = context.bindService(

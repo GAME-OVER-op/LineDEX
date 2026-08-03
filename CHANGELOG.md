@@ -5,6 +5,7 @@
 - Fix NDK r29 validation and native helper compilation by using `clang --target=aarch64-linux-android35` instead of a nonexistent API 36 wrapper.
 
 ## CI maintenance
+- Fixed bridge authentication: `Service.onBind()` no longer reads Binder caller identity; the exported bridge service is protected by a signature permission and validates UID 1000 inside the actual AIDL transaction.
 - Scope Android 16 private-API lint suppressions to the two LSPosed-only system hooks instead of disabling lint globally.
 - Fixed GitHub Actions unit-test tasks for AGP 9 by running the generated debug host-test variant.
 

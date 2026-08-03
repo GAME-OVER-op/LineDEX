@@ -24,3 +24,7 @@ repository owner before public disclosure.
 
 A production deployment should additionally pin the expected APK signing
 certificate in the `system_server` bridge before supporting third-party builds.
+## system_server bridge authentication
+
+`LineDexBridgeService` is exported only for the LSPosed code running as UID 1000. The service is protected by an application-specific signature permission and accepts only the explicit LineDEX bridge action. Caller identity is not read from `Service.onBind()`, because that callback is dispatched by the application main thread and does not preserve the original Binder caller. The actual AIDL transaction `publishSystemBridge()` validates `Binder.getCallingUid() == Process.SYSTEM_UID` before accepting the privileged bridge.
+
