@@ -268,7 +268,7 @@ final class DisplayProfileController {
                 DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
         for (final Display display : presentations) {
             if (display != null
-                    && display.getType() == Display.TYPE_EXTERNAL
+                    && display.getDisplayId() != Display.DEFAULT_DISPLAY
                     && display.getState() != Display.STATE_OFF) {
                 return display;
             }

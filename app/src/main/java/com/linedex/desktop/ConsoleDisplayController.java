@@ -54,17 +54,7 @@ final class ConsoleDisplayController {
         if (manager == null) {
             return -1;
         }
-        int result = -1;
-        for (final Display display : manager.getDisplays()) {
-            if (display.getDisplayId() > Display.DEFAULT_DISPLAY
-                    && display.getType() == Display.TYPE_EXTERNAL
-                    && display.getState() != Display.STATE_OFF) {
-                if (result < 0 || display.getDisplayId() < result) {
-                    result = display.getDisplayId();
-                }
-            }
-        }
-        return result;
+        return ExternalDisplayCompat.findActiveExternalDisplayId(manager);
     }
 
     static boolean requestConsoleMode(final int externalDisplayId) {

@@ -279,13 +279,7 @@ final class ConsoleModeSwitcher {
                 ? null : context.getSystemService(
                         android.hardware.display.DisplayManager.class);
         if (manager != null) {
-            for (final android.view.Display display : manager.getDisplays()) {
-                if (display.getDisplayId() != android.view.Display.DEFAULT_DISPLAY
-                        && display.getType() == android.view.Display.TYPE_EXTERNAL
-                        && display.getState() != android.view.Display.STATE_OFF) {
-                    return display.getDisplayId();
-                }
-            }
+            return ExternalDisplayCompat.findActiveExternalDisplayId(manager);
         }
         return -1;
     }

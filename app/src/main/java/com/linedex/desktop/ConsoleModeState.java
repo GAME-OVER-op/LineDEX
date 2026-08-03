@@ -29,14 +29,7 @@ final class ConsoleModeState {
         if (manager == null) {
             return -1;
         }
-        for (final Display display : manager.getDisplays()) {
-            if (display.getDisplayId() != Display.DEFAULT_DISPLAY
-                    && display.getType() == Display.TYPE_EXTERNAL
-                    && display.getState() != Display.STATE_OFF) {
-                return display.getDisplayId();
-            }
-        }
-        return -1;
+        return ExternalDisplayCompat.findActiveExternalDisplayId(manager);
     }
 
     static boolean isActive(final Context context) {

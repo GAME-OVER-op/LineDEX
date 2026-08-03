@@ -15,6 +15,7 @@ import android.provider.Settings;
 import android.util.Log;
 import android.view.Display;
 
+import com.linedex.desktop.ExternalDisplayCompat;
 import com.linedex.desktop.BuildConfig;
 import com.linedex.desktop.LineDexPreferences;
 import com.linedex.desktop.bridge.ILineDexAppEndpoint;
@@ -352,7 +353,7 @@ final class HookRuntime {
         }
         sExternalDisplayId = Arrays.stream(manager.getDisplays())
                 .filter(display -> display.getDisplayId() != Display.DEFAULT_DISPLAY)
-                .filter(display -> display.getType() == Display.TYPE_EXTERNAL)
+                .filter(display -> ExternalDisplayCompat.isExternal(manager, display))
                 .filter(display -> display.getState() != Display.STATE_OFF)
                 .map(Display::getDisplayId)
                 .min(Comparator.naturalOrder())
@@ -408,7 +409,7 @@ final class HookRuntime {
         }
         final DisplayManager manager = context.getSystemService(DisplayManager.class);
         final Display display = manager == null ? null : manager.getDisplay(displayId);
-        if (display == null || display.getType() != Display.TYPE_EXTERNAL) {
+        if (!ExternalDisplayCompat.isExternal(manager, display)) {
             return false;
         }
         Display.Mode match = null;

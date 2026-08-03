@@ -435,11 +435,7 @@ public final class LineDexControlActivity extends Activity
         if (manager == null) {
             return null;
         }
-        return Arrays.stream(manager.getDisplays())
-                .filter(display -> display.getDisplayId() != Display.DEFAULT_DISPLAY)
-                .filter(display -> display.getType() == Display.TYPE_EXTERNAL)
-                .findFirst()
-                .orElse(null);
+        return ExternalDisplayCompat.findActiveExternalDisplay(manager);
     }
 
     private TextView text(

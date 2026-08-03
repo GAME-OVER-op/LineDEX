@@ -1,5 +1,6 @@
 # Changelog
 
+- Replace direct hidden `Display.getType()` / `Display.TYPE_EXTERNAL` calls with public-SDK presentation-display discovery.
 - Correct the Gradle 9.4.1 binary distribution SHA-256 checksum used by the wrapper.
 - Fix NDK r29 validation and native helper compilation by using `clang --target=aarch64-linux-android35` instead of a nonexistent API 36 wrapper.
 

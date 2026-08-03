@@ -633,16 +633,7 @@ public final class MagicDeskRuntimeService extends Service
                 && mDisplayManager.getDisplay(bridgeDisplayId) != null) {
             return bridgeDisplayId;
         }
-        if (mDisplayManager != null) {
-            for (final Display display : mDisplayManager.getDisplays()) {
-                if (display.getDisplayId() != Display.DEFAULT_DISPLAY
-                        && display.getType() == Display.TYPE_EXTERNAL
-                        && display.getState() != Display.STATE_OFF) {
-                    return display.getDisplayId();
-                }
-            }
-        }
-        return -1;
+        return ExternalDisplayCompat.findActiveExternalDisplayId(mDisplayManager);
     }
 
     private void updateDesktopTasks() {

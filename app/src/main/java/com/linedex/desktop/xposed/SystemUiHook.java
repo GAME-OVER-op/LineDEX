@@ -5,6 +5,7 @@ import android.hardware.display.DisplayManager;
 import android.provider.Settings;
 import android.view.Display;
 
+import com.linedex.desktop.ExternalDisplayCompat;
 import java.lang.reflect.Method;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -126,12 +127,13 @@ final class SystemUiHook {
                 ? null : context.getSystemService(DisplayManager.class);
         for (final Object argument : arguments) {
             if (argument instanceof Display) {
-                return ((Display) argument).getType() == Display.TYPE_EXTERNAL;
+                return ExternalDisplayCompat.isExternal(
+                        manager, (Display) argument);
             }
             if (argument instanceof Integer && manager != null) {
                 final Display display = manager.getDisplay((Integer) argument);
                 if (display != null) {
-                    return display.getType() == Display.TYPE_EXTERNAL;
+                    return ExternalDisplayCompat.isExternal(manager, display);
                 }
             }
         }
