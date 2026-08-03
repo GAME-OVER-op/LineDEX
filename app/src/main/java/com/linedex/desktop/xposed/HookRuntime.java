@@ -1,5 +1,6 @@
 package com.linedex.desktop.xposed;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.hardware.display.DisplayManager;
@@ -365,6 +366,7 @@ final class HookRuntime {
         forcePointerDisplay(target >= 0 ? target : Display.DEFAULT_DISPLAY);
     }
 
+    @SuppressLint({"BlockedPrivateApi", "PrivateApi"})
     private static void forcePointerDisplay(final int displayId) {
         try {
             final Class<?> localServices = Class.forName(
@@ -398,6 +400,7 @@ final class HookRuntime {
         }
     }
 
+    @SuppressLint({"BlockedPrivateApi", "PrivateApi"})
     private static boolean applyPreferredMode(
             final int displayId,
             final int width,
