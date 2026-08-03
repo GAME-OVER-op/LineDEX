@@ -50,7 +50,7 @@ Requirements:
 - Native helpers target Android native API 35 via NDK `clang --target`; the APK itself requires Android 16 / API 36.
 
 ```bash
-./gradlew :app:testDevReleaseUnitTest :app:lintDevRelease :app:assembleDevRelease
+./gradlew :app:testDebugUnitTest :app:lintDevRelease :app:assembleDevRelease
 ```
 
 Output:

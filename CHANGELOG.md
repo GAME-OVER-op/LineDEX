@@ -4,6 +4,7 @@
 - Fix NDK r29 validation and native helper compilation by using `clang --target=aarch64-linux-android35` instead of a nonexistent API 36 wrapper.
 
 ## CI maintenance
+- Fixed GitHub Actions unit-test tasks for AGP 9 by running the generated debug host-test variant.
 
 - Install Android command-line tools before invoking `sdkmanager`.
 - Provision platform 36, build-tools 36.0.0 and NDK 29 through `android-actions/setup-android@v4`.

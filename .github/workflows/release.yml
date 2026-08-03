@@ -120,7 +120,7 @@ jobs:
         run: |
           set -euo pipefail
           ./gradlew --no-daemon \
-            :app:testReleaseUnitTest \
+            :app:testDebugUnitTest \
             :app:lintRelease \
             :app:assembleRelease
 
