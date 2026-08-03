@@ -47,6 +47,7 @@ Requirements:
 - Android build-tools 36.0.0
 - Android 16 target SDK 36
 - Android NDK `29.0.14206865`
+- Native helpers target Android native API 35 via NDK `clang --target`; the APK itself requires Android 16 / API 36.
 
 ```bash
 ./gradlew :app:testDevReleaseUnitTest :app:lintDevRelease :app:assembleDevRelease

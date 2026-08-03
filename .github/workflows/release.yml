@@ -85,7 +85,18 @@ jobs:
           require_file "$sdk_root/platforms/android-36/android.jar"
           require_exec "$sdk_root/build-tools/36.0.0/aapt2"
           require_exec "$sdk_root/build-tools/36.0.0/apksigner"
-          require_exec "$ndk_home/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android36-clang"
+          ndk_toolchain="$ndk_home/toolchains/llvm/prebuilt/linux-x86_64"
+          require_exec "$ndk_toolchain/bin/clang"
+          require_file "$ndk_toolchain/sysroot/usr/include/android/api-level.h"
+
+          echo "NDK clang version:"
+          "$ndk_toolchain/bin/clang" --version
+          echo "Verifying Android arm64 API 35 target support..."
+          printf 'int main(void) { return 0; }\n' \
+            | "$ndk_toolchain/bin/clang" \
+                --target=aarch64-linux-android35 \
+                --sysroot="$ndk_toolchain/sysroot" \
+                -x c -fsyntax-only -
 
       - name: Restore release keystore
         shell: bash

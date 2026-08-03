@@ -1,5 +1,6 @@
 # Changelog
 
+- Fix NDK r29 validation and native helper compilation by using `clang --target=aarch64-linux-android35` instead of a nonexistent API 36 wrapper.
 
 ## CI maintenance
 

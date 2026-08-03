@@ -62,12 +62,23 @@ def resolveNativeCompilerCommand = {
         throw new GradleException(
                 'ANDROID_NDK_HOME is required to build the input helpers')
     }
-    def ndkCompiler = file("${ndkHome}/toolchains/llvm/prebuilt/linux-x86_64"
-            + '/bin/aarch64-linux-android36-clang')
+    def ndkToolchain = file("${ndkHome}/toolchains/llvm/prebuilt/linux-x86_64")
+    def ndkCompiler = file("${ndkToolchain}/bin/clang")
+    def ndkSysroot = file("${ndkToolchain}/sysroot")
     if (!ndkCompiler.isFile()) {
-        throw new GradleException("Android NDK compiler not found: ${ndkCompiler}")
+        throw new GradleException("Android NDK clang not found: ${ndkCompiler}")
     }
-    return [ndkCompiler.absolutePath]
+    if (!ndkSysroot.isDirectory()) {
+        throw new GradleException("Android NDK sysroot not found: ${ndkSysroot}")
+    }
+    // NDK r29 ships target wrappers through API 35. The helpers use no API-36-only
+    // native symbols, so targeting API 35 is correct and remains compatible with
+    // LineDEX's Android 16 / API 36 application requirement.
+    return [
+            ndkCompiler.absolutePath,
+            '--target=aarch64-linux-android35',
+            "--sysroot=${ndkSysroot.absolutePath}"
+    ]
 }
 
 tasks.register('buildMagicDeskUinputBridge', Exec) {
