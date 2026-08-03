@@ -7,16 +7,16 @@ import org.junit.Test;
 
 public final class ShellAccessSnapshotTest {
     @Test
-    public void shellServerWithPermissionIsReady() {
-        assertTrue(snapshot(true, true, 2000, 11).isReady());
+    public void grantedRootBackendIsReady() {
+        assertTrue(snapshot(true, true, 0, 1).isReady());
     }
 
     @Test
-    public void unavailableOrUnprivilegedServerIsNotReady() {
-        assertFalse(snapshot(false, true, 2000, 11).isReady());
-        assertFalse(snapshot(true, false, 2000, 11).isReady());
-        assertFalse(snapshot(true, true, 0, 11).isReady());
-        assertFalse(snapshot(true, true, 2000, 10).isReady());
+    public void unavailableDeniedOrUnprivilegedBackendIsNotReady() {
+        assertFalse(snapshot(false, true, 0, 1).isReady());
+        assertFalse(snapshot(true, false, 0, 1).isReady());
+        assertFalse(snapshot(true, true, 2000, 1).isReady());
+        assertFalse(snapshot(true, true, 10615, 1).isReady());
     }
 
     private static ShellAccess.Snapshot snapshot(

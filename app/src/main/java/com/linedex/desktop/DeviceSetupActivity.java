@@ -16,6 +16,8 @@ import android.view.View;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.linedex.desktop.bridge.LineDexBridgeClient;
+
 import java.io.IOException;
 
 public final class DeviceSetupActivity extends Activity {
@@ -182,7 +184,7 @@ public final class DeviceSetupActivity extends Activity {
                                 audit.manufacturer, audit.model),
                 audit.compatibleDevice);
         setStatusValue(
-                mSetupView.shizukuValue(),
+                mSetupView.rootValue(),
                 getString(audit.shellReady
                         ? R.string.setup_value_available
                         : R.string.setup_value_unavailable),
@@ -217,29 +219,29 @@ public final class DeviceSetupActivity extends Activity {
 
         if (!audit.shellState.running) {
             mSetupView.summary().setText(audit.shellState.installed
-                    ? R.string.setup_status_shizuku_stopped
-                    : R.string.setup_status_shizuku_not_installed);
+                    ? R.string.setup_status_root_denied
+                    : R.string.setup_status_root_missing);
             mSetupView.summary().setTextColor(COLOR_AMBER);
             mSetupView.primaryAction().setText(audit.shellState.installed
-                    ? R.string.setup_action_open_shizuku
-                    : R.string.setup_action_get_shizuku);
+                    ? R.string.setup_action_request_root
+                    : R.string.setup_action_request_root);
             mSetupView.primaryAction().setOnClickListener(
-                    view -> ShellAccess.openManagerOrWebsite(this));
+                    view -> requestRootPermission());
             setCloseAction();
             return;
         }
         if (!audit.shellState.permissionGranted) {
-            mSetupView.summary().setText(R.string.setup_status_shizuku_permission);
+            mSetupView.summary().setText(R.string.setup_status_root_permission);
             mSetupView.summary().setTextColor(COLOR_AMBER);
-            mSetupView.primaryAction().setText(R.string.setup_action_allow_shizuku);
+            mSetupView.primaryAction().setText(R.string.setup_action_request_root);
             mSetupView.primaryAction().setOnClickListener(
-                    view -> requestShizukuPermission());
+                    view -> requestRootPermission());
             setCloseAction();
             return;
         }
         if (!audit.shellReady) {
             mSetupView.summary().setText(getString(
-                    R.string.setup_status_shizuku_failed,
+                    R.string.setup_status_root_failed,
                     audit.runtimeError));
             mSetupView.summary().setTextColor(COLOR_RED);
             mSetupView.primaryAction().setText(R.string.setup_action_recheck);
@@ -286,7 +288,7 @@ public final class DeviceSetupActivity extends Activity {
 
         mSetupView.summary().setText(mManual
                 ? getString(
-                        R.string.setup_status_shizuku_ready,
+                        R.string.setup_status_root_ready,
                         audit.shellState.uid)
                 : getString(R.string.setup_status_ready));
         mSetupView.summary().setTextColor(COLOR_CYAN);
@@ -421,18 +423,26 @@ public final class DeviceSetupActivity extends Activity {
                 .show();
     }
 
-    private void requestShizukuPermission() {
-        try {
-            ShellAccess.requestPermission();
-        } catch (RuntimeException error) {
-            Log.w(TAG, "could not request Shizuku permission", error);
-            Toast.makeText(
-                    this,
-                    getString(
-                            R.string.setup_status_shizuku_failed,
-                            error.getMessage()),
-                    Toast.LENGTH_LONG).show();
-        }
+    private void requestRootPermission() {
+        setBusy(true, R.string.setup_status_applying);
+        final Thread request = new Thread(() -> {
+            final ShellAccess.Snapshot snapshot = ShellAccess.refresh();
+            runOnUiThread(() -> {
+                setBusy(false, 0);
+                if (!snapshot.isReady()) {
+                    Log.w(TAG, "could not request root access: " + snapshot.error);
+                    Toast.makeText(
+                            this,
+                            getString(
+                                    R.string.setup_status_root_failed,
+                                    snapshot.error),
+                            Toast.LENGTH_LONG).show();
+                }
+                runAudit();
+            });
+        }, "LineDexRootRequest");
+        request.setDaemon(true);
+        request.start();
     }
 
     private void handleShellStateChanged() {
@@ -660,8 +670,8 @@ public final class DeviceSetupActivity extends Activity {
     }
 
     private int activeConsoleDisplayId() {
-        final int configured = Settings.Global.getInt(
-                getContentResolver(), "app_mirror_displayid", -1);
+        final Bundle state = LineDexBridgeClient.state();
+        final int configured = state.getInt("externalDisplayId", -1);
         final android.hardware.display.DisplayManager displayManager =
                 getSystemService(android.hardware.display.DisplayManager.class);
         if (configured > Display.DEFAULT_DISPLAY

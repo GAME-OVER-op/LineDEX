@@ -18,10 +18,11 @@ Verified class and method names in the supplied `services.jar`:
 com.android.server.SystemServer#startOtherServices
 com.android.server.display.DisplayManagerService#isExtendedDisplayAllowed
 com.android.server.wm.InputManagerCallback#getPointerDisplayId
-android.hardware.input.InputManagerInternal#setVirtualMousePointerDisplayId
+com.android.server.input.InputManagerInternal (local service)
+com.android.server.input.InputManagerService.mNative#setPointerDisplayId
 ```
 
-`getPointerDisplayId()` is the critical physical-mouse route. The stock implementation returns display 0 when the legacy force-desktop field is false, even when a hot-plugged external display has already accepted a separate Activity.
+`getPointerDisplayId()` is the policy hook for the physical-mouse route. The supplied ROM also exposes the native `setPointerDisplayId(int)` path, which LineDEX invokes after session or input-device changes. The stock implementation returns display 0 when the legacy force-desktop field is false, even when a hot-plugged external display has already accepted a separate Activity.
 
 `isExtendedDisplayAllowed()` is hooked dynamically. This replaces the manual post-boot `force_desktop_mode_on_external_displays=1` workaround.
 

@@ -32,7 +32,7 @@ public final class LineDexBridgeClient {
         }
         try {
             return bridge.asBinder().isBinderAlive() && bridge.isHookActive();
-        } catch (RemoteException ignored) {
+        } catch (RemoteException | RuntimeException ignored) {
             clearBridge(bridge.asBinder());
             return false;
         }
@@ -54,7 +54,7 @@ public final class LineDexBridgeClient {
         try {
             final Bundle state = bridge.getState();
             return state == null ? Bundle.EMPTY : state;
-        } catch (RemoteException ignored) {
+        } catch (RemoteException | RuntimeException ignored) {
             clearBridge(bridge.asBinder());
             return Bundle.EMPTY;
         }

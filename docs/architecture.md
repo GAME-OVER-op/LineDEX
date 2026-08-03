@@ -6,7 +6,7 @@
 
 `DesktopActivity` is both manually launchable on a selected display and registered as `android.intent.category.SECONDARY_HOME`. The inherited MagicDesk desktop shell supplies the Start menu, taskbar, application repository, task overview, notifications, workspace profiles and freeform task controls.
 
-`LineDexBridgeService` is an explicit endpoint. It accepts only system UID binding. The service receives the privileged system bridge Binder from the Xposed code and publishes it to `LineDexBridgeClient`.
+`LineDexBridgeService` is an explicit endpoint protected by an application-specific permission and action. The actual `publishSystemBridge()` AIDL transaction accepts only UID 1000. The service receives the privileged system bridge Binder from the Xposed code and publishes it to `LineDexBridgeClient`.
 
 ## system_server process
 
@@ -25,16 +25,16 @@ The bridge is delivered by explicitly binding to the application's `LineDexBridg
 
 ## SystemUI process
 
-The SystemUI hook reads the dynamic `linedex_session_enabled` global setting. While enabled, it allows the verified WMShell `DesktopStateImpl` implementations to enter desktop/freeform mode on external displays.
+The root backend writes the dynamic `linedex_session_enabled` global setting before enabling the bridge. The SystemUI hook reads that setting. While enabled, it allows the verified WMShell `DesktopStateImpl` implementations to enter desktop/freeform mode on external displays.
 
 No custom window frames are drawn by LineDEX. Window captions, resizing, maximize, fullscreen, snapping and transitions remain WMShell-owned.
 
-## Shizuku
+## Root command backend
 
-The inherited task-control layer uses a Shizuku UserService running as shell UID 2000. This is separate from the LSPosed bridge:
+The inherited task-control layer uses short-lived commands launched through `su`. This remains separate from the LSPosed bridge:
 
 - LSPosed handles display policy, pointer routing and system-only APIs.
-- Shizuku handles task/window shell commands and task observation.
+- Root handles task/window shell commands, native helpers, and task polling.
 
 ## Failure behavior
 

@@ -22,7 +22,7 @@ final class DeviceSetupView {
     private LinearLayout mSecondaryRow;
     private TextView mDisplayTargetValue;
     private TextView mDeviceValue;
-    private TextView mShizukuValue;
+    private TextView mRootValue;
     private TextView mOverlayValue;
     private TextView mRestrictionsValue;
     private TextView mCornersValue;
@@ -98,7 +98,7 @@ final class DeviceSetupView {
                 mDisplayTargetValue,
                 mActivity::showDisplayTargetChooser);
         mDeviceValue = addStatusRow(mDetails, R.string.setup_item_device);
-        mShizukuValue = addStatusRow(mDetails, R.string.setup_item_shizuku);
+        mRootValue = addStatusRow(mDetails, R.string.setup_item_root);
         mOverlayValue = addStatusRow(mDetails, R.string.setup_item_overlays);
         mRestrictionsValue = addStatusRow(
                 mDetails, R.string.setup_item_desktop_eligibility);
@@ -220,8 +220,8 @@ final class DeviceSetupView {
         return mDeviceValue;
     }
 
-    TextView shizukuValue() {
-        return mShizukuValue;
+    TextView rootValue() {
+        return mRootValue;
     }
 
     TextView overlayValue() {

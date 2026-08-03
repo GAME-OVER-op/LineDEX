@@ -199,7 +199,7 @@ final class ConsoleModeSwitcher {
 
     static void lockDevice() {
         if (!ShellAccess.isReady()) {
-            Log.w(TAG, "device lock unavailable; shizuku="
+            Log.w(TAG, "device lock unavailable; root="
                     + ShellAccess.statusLabel());
             return;
         }
@@ -237,7 +237,7 @@ final class ConsoleModeSwitcher {
 
     static void captureScreenshot() {
         if (!ShellAccess.isReady()) {
-            Log.w(TAG, "screenshot unavailable; shizuku="
+            Log.w(TAG, "screenshot unavailable; root="
                     + ShellAccess.statusLabel());
             return;
         }

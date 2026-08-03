@@ -48,7 +48,7 @@ body:
     id: firmware
     attributes:
       label: Firmware and Xposed environment
-      description: ROM name/build, Android version, device codename, LSPosed/Revenge Xposed version, and Shizuku version.
+      description: ROM name/build, Android version, device codename, LSPosed/Revenge Xposed version, and root manager/version.
     validations:
       required: true
   - type: textarea

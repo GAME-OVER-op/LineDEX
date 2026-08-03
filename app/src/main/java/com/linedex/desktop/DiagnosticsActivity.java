@@ -160,7 +160,7 @@ public final class DiagnosticsActivity extends Activity {
             return;
         }
         clipboard.setPrimaryClip(
-                ClipData.newPlainText("MagicDesk compatibility report", mReport));
+                ClipData.newPlainText("LineDEX compatibility report", mReport));
         Toast.makeText(this, R.string.diagnostics_copied, Toast.LENGTH_SHORT).show();
     }
 
@@ -170,7 +170,7 @@ public final class DiagnosticsActivity extends Activity {
         }
         final Intent share = new Intent(Intent.ACTION_SEND)
                 .setType("text/plain")
-                .putExtra(Intent.EXTRA_SUBJECT, "MagicDesk compatibility report")
+                .putExtra(Intent.EXTRA_SUBJECT, "LineDEX compatibility report")
                 .putExtra(Intent.EXTRA_TEXT, mReport);
         startActivity(Intent.createChooser(share, getString(R.string.diagnostics_share)));
     }

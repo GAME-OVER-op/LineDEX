@@ -1,18 +1,16 @@
 # Changelog
 
-- Replace direct hidden `Display.getType()` / `Display.TYPE_EXTERNAL` calls with public-SDK presentation-display discovery.
-- Correct the Gradle 9.4.1 binary distribution SHA-256 checksum used by the wrapper.
-- Fix NDK r29 validation and native helper compilation by using `clang --target=aarch64-linux-android35` instead of a nonexistent API 36 wrapper.
+## 0.1.0-alpha02
 
-## CI maintenance
-- Fixed bridge authentication: `Service.onBind()` no longer reads Binder caller identity; the exported bridge service is protected by a signature permission and validates UID 1000 inside the actual AIDL transaction.
-- Scope Android 16 private-API lint suppressions to the two LSPosed-only system hooks instead of disabling lint globally.
-- Fixed GitHub Actions unit-test tasks for AGP 9 by running the generated debug host-test variant.
-
-- Install Android command-line tools before invoking `sdkmanager`.
-- Provision platform 36, build-tools 36.0.0 and NDK 29 through `android-actions/setup-android@v4`.
-- Move GitHub-hosted actions to Node 24-compatible major versions.
-- Derive Android SDK and NDK paths from the setup action instead of hard-coding runner paths.
+- Removed the Shizuku dependency, provider, UserService and AIDL command service.
+- Replaced privileged app commands with a root-only `su -c` backend for settings, tasks, native helpers and diagnostics.
+- Fixed the desktop switch crash by moving Settings writes out of the app-originated `system_server` Binder call.
+- Made session enable asynchronous and fail-safe: root or Binder failures restore the switch instead of terminating LineDEX.
+- Corrected the Android 16 input service class to `com.android.server.input.InputManagerInternal`.
+- Added physical mouse routing through `InputManagerService.mNative.setPointerDisplayId()` with a virtual-pointer compatibility fallback.
+- Updated diagnostics, setup UI and unit tests for REDMAGIC 9 Pro / NX769J and the root-only architecture.
+- Replaced hidden `Display.getType()` use with public presentation-display discovery.
+- Retained the CI fixes for Android API 36, NDK r29, Gradle 9.4.1 and AGP 9 unit-test/lint tasks.
 
 ## 0.1.0-alpha01
 
@@ -23,5 +21,5 @@
 - Added dynamic extended-display policy and physical pointer routing hooks.
 - Added WMShell desktop-eligibility hooks for the verified LineageOS 23.2 firmware.
 - Registered the inherited MagicDesk shell as an external-display `SECONDARY_HOME`.
-- Added native monitor-mode selection, per-display DPI handling, and Shizuku task control.
+- Added native monitor-mode selection, per-display DPI handling, and root task control.
 - Added `devRelease` and signed `release` GitHub Actions workflows.

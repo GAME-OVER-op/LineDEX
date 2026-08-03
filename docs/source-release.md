@@ -8,7 +8,7 @@ for GitHub Actions and device testing on the supplied LineageOS 23.2 firmware.
 ## Included
 
 - Android application and external-display desktop shell
-- Shizuku AIDL/UserService task backend
+- root-only task and shell backend
 - LineDEX app-to-`system_server` AIDL bridge
 - legacy-compatible Xposed entry and compile-only API declarations
 - `system_server` display-policy and pointer-routing hooks

@@ -4,6 +4,7 @@ import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.hardware.display.DisplayManager;
+import android.hardware.input.InputManager;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
@@ -12,9 +13,9 @@ import android.os.Looper;
 import android.os.Process;
 import android.os.RemoteCallbackList;
 import android.os.RemoteException;
-import android.provider.Settings;
 import android.util.Log;
 import android.view.Display;
+import android.view.InputDevice;
 
 import com.linedex.desktop.ExternalDisplayCompat;
 import com.linedex.desktop.BuildConfig;
@@ -30,6 +31,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -39,7 +42,6 @@ final class HookRuntime {
     static final int INTERFACE_VERSION = 1;
     private static final String TAG = "LineDexHookRuntime";
     private static final String PACKAGE_NAME = BuildConfig.APPLICATION_ID;
-    private static final String GLOBAL_SESSION = "linedex_session_enabled";
     private static final int INVALID_DISPLAY = -1;
 
     private static final AtomicBoolean INITIALIZED = new AtomicBoolean();
@@ -49,12 +51,18 @@ final class HookRuntime {
     private static final RemoteCallbackList<ILineDexCallback> CALLBACKS =
             new RemoteCallbackList<>();
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private static final ExecutorService POINTER_EXECUTOR =
+            Executors.newSingleThreadExecutor(runnable -> {
+                final Thread thread = new Thread(runnable, "LineDexPointerRoute");
+                thread.setDaemon(true);
+                return thread;
+            });
 
     private static volatile Context sContext;
     private static volatile ClassLoader sClassLoader;
     private static volatile String sModulePath = "";
     private static volatile int sExternalDisplayId = INVALID_DISPLAY;
-    private static volatile int sAppliedPointerDisplayId = Display.DEFAULT_DISPLAY;
+    private static volatile int sAppliedPointerDisplayId = Display.INVALID_DISPLAY;
     private static volatile String sLastErrorCode = "";
     private static volatile String sLastErrorMessage = "";
     private static volatile ILineDexAppEndpoint sAppEndpoint;
@@ -232,8 +240,26 @@ final class HookRuntime {
                         }
                     }, MAIN);
         }
-        Settings.Global.putInt(
-                context.getContentResolver(), GLOBAL_SESSION, 0);
+        final InputManager inputManager = context.getSystemService(InputManager.class);
+        if (inputManager != null) {
+            inputManager.registerInputDeviceListener(
+                    new InputManager.InputDeviceListener() {
+                        @Override
+                        public void onInputDeviceAdded(final int deviceId) {
+                            applyPointerTarget();
+                        }
+
+                        @Override
+                        public void onInputDeviceRemoved(final int deviceId) {
+                            applyPointerTarget();
+                        }
+
+                        @Override
+                        public void onInputDeviceChanged(final int deviceId) {
+                            applyPointerTarget();
+                        }
+                    }, MAIN);
+        }
         XposedBridge.log(TAG + ": initialized on " + android.os.Build.FINGERPRINT);
     }
 
@@ -297,13 +323,6 @@ final class HookRuntime {
 
     private static void setDesktopEnabled(final boolean enabled) {
         DESKTOP_ENABLED.set(enabled);
-        final Context context = sContext;
-        if (context != null) {
-            Settings.Global.putInt(
-                    context.getContentResolver(),
-                    GLOBAL_SESSION,
-                    enabled ? 1 : 0);
-        }
         refreshExternalDisplay();
         applyPointerTarget();
         MAIN.removeCallbacks(AUTO_MODE_APPLY);
@@ -363,41 +382,164 @@ final class HookRuntime {
 
     private static void applyPointerTarget() {
         final int target = pointerDisplayId();
-        forcePointerDisplay(target >= 0 ? target : Display.DEFAULT_DISPLAY);
+        final int overrideDisplayId = target >= 0
+                ? target : Display.INVALID_DISPLAY;
+        POINTER_EXECUTOR.execute(() -> forcePointerDisplay(overrideDisplayId));
     }
 
     @SuppressLint({"BlockedPrivateApi", "PrivateApi"})
     private static void forcePointerDisplay(final int displayId) {
+        if (displayId >= 0 && !hasPhysicalMouse()) {
+            XposedBridge.log(TAG + ": pointer route deferred; no physical mouse");
+            return;
+        }
         try {
             final Class<?> localServices = Class.forName(
                     "com.android.server.LocalServices", false, sClassLoader);
             final Class<?> inputManagerInternal = Class.forName(
-                    "android.hardware.input.InputManagerInternal",
+                    "com.android.server.input.InputManagerInternal",
                     false,
                     sClassLoader);
             final Method getService = localServices.getDeclaredMethod(
                     "getService", Class.class);
             getService.setAccessible(true);
-            final Object service = getService.invoke(null, inputManagerInternal);
-            if (service == null) {
+            final Object localService = getService.invoke(null, inputManagerInternal);
+            if (localService == null) {
                 throw new IllegalStateException("InputManagerInternal unavailable");
             }
-            final Method setter = inputManagerInternal.getDeclaredMethod(
-                    "setVirtualMousePointerDisplayId", Integer.TYPE);
-            setter.setAccessible(true);
-            setter.invoke(service, Integer.valueOf(displayId));
+
+            boolean virtualApplied = false;
+            try {
+                final Method setter = inputManagerInternal.getDeclaredMethod(
+                        "setVirtualMousePointerDisplayId", Integer.TYPE);
+                setter.setAccessible(true);
+                final Object result = setter.invoke(
+                        localService, Integer.valueOf(displayId));
+                virtualApplied = !(result instanceof Boolean)
+                        || ((Boolean) result).booleanValue();
+                if (virtualApplied) {
+                    XposedBridge.log(TAG
+                            + ": virtual pointer override set to " + displayId);
+                }
+            } catch (NoSuchMethodException unavailable) {
+                XposedBridge.log(TAG
+                        + ": virtual pointer override is not present on this ROM");
+            }
+
+            boolean nativeApplied = false;
+            try {
+                final Object inputManagerService = findOuterInputManagerService(
+                        localService);
+                final Object nativeService = findFieldValue(
+                        inputManagerService, "mNative");
+                final Method nativeSetter = findIntMethod(
+                        nativeService.getClass(), "setPointerDisplayId");
+                nativeSetter.setAccessible(true);
+                final int nativeTarget = displayId >= 0
+                        ? displayId : Display.DEFAULT_DISPLAY;
+                nativeSetter.invoke(nativeService, Integer.valueOf(nativeTarget));
+                nativeApplied = true;
+                XposedBridge.log(TAG
+                        + ": physical pointer routed through native input to "
+                        + nativeTarget);
+            } catch (ReflectiveOperationException nativeFailure) {
+                if (!virtualApplied) {
+                    throw nativeFailure;
+                }
+                XposedBridge.log(TAG
+                        + ": native pointer route unavailable after virtual override: "
+                        + nativeFailure);
+            }
+
+            if (!virtualApplied && !nativeApplied) {
+                throw new IllegalStateException(
+                        "InputManager rejected pointer display " + displayId);
+            }
             sAppliedPointerDisplayId = displayId;
             notifyPointerChanged(displayId);
-        } catch (NoSuchMethodException error) {
-            // Android 16 can still use the getPointerDisplayId hook without this nudge.
-            sAppliedPointerDisplayId = displayId;
-            XposedBridge.log(TAG + ": pointer setter unavailable; hook-only mode");
         } catch (Throwable error) {
             recordError(
                     "POINTER-APPLY-001",
                     "Could not switch the physical mouse display",
                     error);
         }
+    }
+
+    @SuppressLint({"BlockedPrivateApi", "PrivateApi"})
+    private static Object findOuterInputManagerService(final Object localService)
+            throws ReflectiveOperationException {
+        Class<?> type = localService.getClass();
+        while (type != null) {
+            for (final java.lang.reflect.Field field : type.getDeclaredFields()) {
+                if (!field.getType().getName().equals(
+                        "com.android.server.input.InputManagerService")) {
+                    continue;
+                }
+                field.setAccessible(true);
+                final Object value = field.get(localService);
+                if (value != null) {
+                    return value;
+                }
+            }
+            type = type.getSuperclass();
+        }
+        throw new NoSuchFieldException("InputManagerService outer instance");
+    }
+
+    @SuppressLint({"BlockedPrivateApi", "PrivateApi"})
+    private static Object findFieldValue(
+            final Object owner, final String name)
+            throws ReflectiveOperationException {
+        Class<?> type = owner.getClass();
+        while (type != null) {
+            try {
+                final java.lang.reflect.Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                final Object value = field.get(owner);
+                if (value == null) {
+                    throw new IllegalStateException(name + " is null");
+                }
+                return value;
+            } catch (NoSuchFieldException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        throw new NoSuchFieldException(name);
+    }
+
+    @SuppressLint({"BlockedPrivateApi", "PrivateApi"})
+    private static Method findIntMethod(
+            final Class<?> type, final String name)
+            throws NoSuchMethodException {
+        Class<?> current = type;
+        while (current != null) {
+            try {
+                return current.getDeclaredMethod(name, Integer.TYPE);
+            } catch (NoSuchMethodException ignored) {
+                current = current.getSuperclass();
+            }
+        }
+        throw new NoSuchMethodException(name + "(int)");
+    }
+
+    private static boolean hasPhysicalMouse() {
+        final Context context = sContext;
+        if (context == null) {
+            return false;
+        }
+        final InputManager manager = context.getSystemService(InputManager.class);
+        if (manager == null) {
+            return false;
+        }
+        for (final int deviceId : manager.getInputDeviceIds()) {
+            final InputDevice device = manager.getInputDevice(deviceId);
+            if (device != null
+                    && !device.isVirtual()
+                    && device.supportsSource(InputDevice.SOURCE_MOUSE)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @SuppressLint({"BlockedPrivateApi", "PrivateApi"})

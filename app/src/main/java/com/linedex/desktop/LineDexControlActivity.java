@@ -100,7 +100,12 @@ public final class LineDexControlActivity extends Activity
     protected void onResume() {
         super.onResume();
         DeviceSetupManager.authorizeRuntime(this);
-        ShellAccess.refresh();
+        final Thread rootProbe = new Thread(() -> {
+            ShellAccess.refresh();
+            runOnUiThread(this::render);
+        }, "LineDexRootRefresh");
+        rootProbe.setDaemon(true);
+        rootProbe.start();
         registerCallback();
         render();
     }
@@ -178,9 +183,9 @@ public final class LineDexControlActivity extends Activity
         mPhoneScreen.setOnClickListener(view -> togglePhoneScreen());
         page.addView(mPhoneScreen, marginTop(10));
 
-        final Button shizuku = button(R.string.linedex_shizuku_action);
-        shizuku.setOnClickListener(view -> requestShizuku());
-        page.addView(shizuku, marginTop(10));
+        final Button root = button(R.string.linedex_root_action);
+        root.setOnClickListener(view -> requestRoot());
+        page.addView(root, marginTop(10));
 
         final Button prepare = button(R.string.linedex_prepare_android);
         prepare.setOnClickListener(view -> prepareAndroidDesktop());
@@ -203,24 +208,100 @@ public final class LineDexControlActivity extends Activity
         if (mRendering) {
             return;
         }
-        LineDexPreferences.setDesktopEnabled(this, enabled);
         final ILineDexSystemBridge bridge = LineDexBridgeClient.bridge();
         if (bridge == null) {
+            LineDexPreferences.setDesktopEnabled(this, false);
+            if (!enabled && ShellAccess.isReady()) {
+                final Thread cleanupThread = new Thread(() -> {
+                    try {
+                        setRootSessionFlag(false);
+                    } catch (java.io.IOException ignored) {
+                        // The module is unavailable; diagnostics will report root errors.
+                    }
+                }, "LineDexSessionCleanup");
+                cleanupThread.setDaemon(true);
+                cleanupThread.start();
+            }
             toast(R.string.linedex_module_inactive);
             render();
             return;
         }
-        try {
-            bridge.setDesktopSessionEnabled(enabled);
-            if (enabled && LineDexPreferences.autoNativeMode(this)) {
-                applyNativeMode();
-            } else if (!enabled) {
-                LineDexSessionCoordinator.stop(this);
-            }
-        } catch (RemoteException error) {
-            toast(error.getMessage());
+        if (!enabled) {
+            mDesktopSwitch.setEnabled(false);
+            final Thread disableThread = new Thread(() -> {
+                Throwable failure = null;
+                try {
+                    if (ShellAccess.isReady()) {
+                        setRootSessionFlag(false);
+                    }
+                    bridge.setDesktopSessionEnabled(false);
+                } catch (java.io.IOException
+                        | RemoteException
+                        | RuntimeException error) {
+                    failure = error;
+                }
+                LineDexPreferences.setDesktopEnabled(
+                        LineDexControlActivity.this, false);
+                final Throwable resultFailure = failure;
+                runOnUiThread(() -> {
+                    LineDexSessionCoordinator.stop(LineDexControlActivity.this);
+                    mDesktopSwitch.setEnabled(true);
+                    if (resultFailure != null) {
+                        toast(usefulMessage(resultFailure));
+                    }
+                    render();
+                });
+            }, "LineDexDisableDesktop");
+            disableThread.setDaemon(true);
+            disableThread.start();
+            return;
         }
-        render();
+
+        if (!ShellAccess.isReady()) {
+            LineDexPreferences.setDesktopEnabled(this, false);
+            requestRoot();
+            toast(R.string.linedex_root_required);
+            render();
+            return;
+        }
+
+        mDesktopSwitch.setEnabled(false);
+        final Thread enableThread = new Thread(() -> {
+            try {
+                prepareAndroidDesktopRoot();
+                setRootSessionFlag(true);
+                bridge.setDesktopSessionEnabled(true);
+                LineDexPreferences.setDesktopEnabled(
+                        LineDexControlActivity.this, true);
+                runOnUiThread(() -> {
+                    mDesktopSwitch.setEnabled(true);
+                    if (LineDexPreferences.autoNativeMode(
+                            LineDexControlActivity.this)) {
+                        applyNativeMode();
+                    }
+                    render();
+                });
+            } catch (java.io.IOException
+                    | RemoteException
+                    | RuntimeException error) {
+                try {
+                    if (ShellAccess.isReady()) {
+                        setRootSessionFlag(false);
+                    }
+                } catch (java.io.IOException ignored) {
+                    // The original enable failure is more useful to the user.
+                }
+                LineDexPreferences.setDesktopEnabled(
+                        LineDexControlActivity.this, false);
+                runOnUiThread(() -> {
+                    mDesktopSwitch.setEnabled(true);
+                    toast(usefulMessage(error));
+                    render();
+                });
+            }
+        }, "LineDexEnableDesktop");
+        enableThread.setDaemon(true);
+        enableThread.start();
     }
 
     private void openDesktop() {
@@ -260,8 +341,8 @@ public final class LineDexControlActivity extends Activity
                             best.getPhysicalHeight(),
                             best.getRefreshRate())
                     : getString(R.string.linedex_mode_failed));
-        } catch (RemoteException error) {
-            toast(error.getMessage());
+        } catch (RemoteException | RuntimeException error) {
+            toast(usefulMessage(error));
         }
     }
 
@@ -281,42 +362,65 @@ public final class LineDexControlActivity extends Activity
         if (bridge != null) {
             try {
                 bridge.setPointerDisplayId(next);
-            } catch (RemoteException error) {
-                toast(error.getMessage());
+            } catch (RemoteException | RuntimeException error) {
+                toast(usefulMessage(error));
             }
         }
         render();
     }
 
-    private void requestShizuku() {
-        try {
-            if (ShellAccess.refresh().isReady()) {
-                toast(R.string.linedex_shizuku_ready);
-            } else {
-                ShellAccess.requestPermission();
-            }
-        } catch (RuntimeException error) {
-            toast(error.getMessage());
-        }
-        render();
+    private void requestRoot() {
+        final Thread request = new Thread(() -> {
+            final ShellAccess.Snapshot snapshot = ShellAccess.refresh();
+            runOnUiThread(() -> {
+                toast(snapshot.isReady()
+                        ? getString(R.string.linedex_root_ready)
+                        : snapshot.error);
+                render();
+            });
+        }, "LineDexRootRequest");
+        request.setDaemon(true);
+        request.start();
     }
 
     private void prepareAndroidDesktop() {
         if (!ShellAccess.isReady()) {
-            toast(R.string.linedex_shizuku_required);
+            toast(R.string.linedex_root_required);
+            requestRoot();
             return;
         }
-        new Thread(() -> {
+        final Thread prepareThread = new Thread(() -> {
             try {
-                ShellAccess.run(
-                        "/system/bin/settings put global enable_freeform_support 1 && "
-                                + "/system/bin/settings put global force_resizable_activities 1 && "
-                                + "/system/bin/settings put secure mirror_built_in_display 0");
+                prepareAndroidDesktopRoot();
                 runOnUiThread(() -> toast(R.string.linedex_android_prepared));
             } catch (java.io.IOException error) {
-                runOnUiThread(() -> toast(error.getMessage()));
+                runOnUiThread(() -> toast(usefulMessage(error)));
             }
-        }, "LineDexPrepareAndroid").start();
+        }, "LineDexPrepareAndroid");
+        prepareThread.setDaemon(true);
+        prepareThread.start();
+    }
+
+    private static void prepareAndroidDesktopRoot() throws java.io.IOException {
+        ShellAccess.run(
+                "/system/bin/settings put global "
+                        + "force_desktop_mode_on_external_displays 1 && "
+                        + "/system/bin/settings put global "
+                        + "override_desktop_mode_features 1 && "
+                        + "/system/bin/settings put global "
+                        + "enable_freeform_support 1 && "
+                        + "/system/bin/settings put global "
+                        + "force_resizable_activities 1 && "
+                        + "/system/bin/settings put secure "
+                        + "mirror_built_in_display 0");
+    }
+
+
+    private static void setRootSessionFlag(final boolean enabled)
+            throws java.io.IOException {
+        ShellAccess.run(
+                "/system/bin/settings put global linedex_session_enabled "
+                        + (enabled ? "1" : "0"));
     }
 
     private void togglePhoneScreen() {
@@ -332,8 +436,8 @@ public final class LineDexControlActivity extends Activity
             } else {
                 toast(R.string.linedex_phone_screen_failed);
             }
-        } catch (RemoteException error) {
-            toast(error.getMessage());
+        } catch (RemoteException | RuntimeException error) {
+            toast(usefulMessage(error));
         }
         render();
     }
@@ -378,7 +482,7 @@ public final class LineDexControlActivity extends Activity
         mPointerState.setText(getString(
                 R.string.linedex_pointer_state, pointer));
         mShellState.setText(getString(
-                R.string.linedex_shizuku_state, ShellAccess.statusLabel()));
+                R.string.linedex_root_state, ShellAccess.statusLabel()));
         final String code = state.getString("lastErrorCode", "");
         final String message = state.getString("lastErrorMessage", "");
         mErrorState.setText(code.isEmpty()
@@ -487,4 +591,10 @@ public final class LineDexControlActivity extends Activity
                 message == null ? getString(R.string.linedex_unknown_error) : message,
                 Toast.LENGTH_LONG).show();
     }
+    private static String usefulMessage(final Throwable error) {
+        final String message = error.getMessage();
+        return message == null || message.isEmpty()
+                ? error.getClass().getSimpleName() : message;
+    }
+
 }

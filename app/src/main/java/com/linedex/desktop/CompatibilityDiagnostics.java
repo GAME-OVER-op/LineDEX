@@ -6,10 +6,13 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.hardware.display.DisplayManager;
 import android.os.Build;
+import android.os.Bundle;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.view.Display;
 import android.view.InputDevice;
+
+import com.linedex.desktop.bridge.LineDexBridgeClient;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -114,7 +117,7 @@ final class CompatibilityDiagnostics {
         final DeviceSetupManager.Audit audit =
                 DeviceSetupManager.audit(appContext, SessionProfile.load(appContext));
         final StringBuilder report = new StringBuilder(24_000);
-        report.append("# MagicDesk compatibility report\n\n")
+        report.append("# LineDEX compatibility report\n\n")
                 .append("Report format: 1\n")
                 .append("Generated UTC: ").append(utcNow()).append('\n')
                 .append("App: ").append(appVersion(appContext)).append('\n')
@@ -123,15 +126,15 @@ final class CompatibilityDiagnostics {
 
         appendDevice(report);
         appendCompatibility(report, appContext, audit);
-        appendShizukuProbe(report, audit);
+        appendRootProbe(report, audit);
         appendDisplays(report, appContext);
         appendInputDevices(report);
         appendEvents(report, appContext);
-        appendMagicDeskLogcat(report);
+        appendLineDexLogcat(report);
         report.append("\n## Privacy note\n")
                 .append("This report omits notification contents, user files, account data, ")
                 .append("and the installed-app list. It may contain Android package names ")
-                .append("and task/display identifiers from MagicDesk error logs.\n");
+                .append("and task/display identifiers from LineDEX error logs.\n");
         return report.toString();
     }
 
@@ -163,7 +166,7 @@ final class CompatibilityDiagnostics {
         final SessionProfile profile = audit.sessionProfile == null
                 ? SessionProfile.load(context) : audit.sessionProfile;
         report.append("## Runtime profile\n")
-                .append("Shizuku runtime: ")
+                .append("Root backend: ")
                 .append(ShellAccess.statusLabel()).append('\n')
                 .append("Display target: ").append(profile.displayWireName()).append('\n')
                 .append("System provisioning: ")
@@ -175,15 +178,15 @@ final class CompatibilityDiagnostics {
                 audit.manufacturer + " " + audit.model);
         appendCheck(report, "PROFILE-001", audit.verifiedDevice,
                 "Firmware profile verified by maintainers",
-                audit.verifiedDevice ? "REDMAGIC 11 Pro / NX809J / 20260204.221845"
+                audit.verifiedDevice ? "REDMAGIC 9 Pro / NX769J / LineageOS 23.2"
                         : "Unverified model or firmware; capability probing is required");
         final boolean shellReady = audit.shellReady;
-        appendCheck(report, "SHIZUKU-001",
+        appendCheck(report, "ROOT-001",
                 shellReady,
-                "Shizuku command service",
+                "Root command backend",
                 shellReady
-                        ? "API " + audit.shellState.version
-                                + ", service uid=" + audit.shellState.uid
+                        ? "backend " + audit.shellState.version
+                                + ", uid=" + audit.shellState.uid
                         : audit.runtimeError);
         appendCheck(report, "WM-FREEFORM-001", audit.freeformEnabled,
                 "Freeform support setting",
@@ -235,13 +238,23 @@ final class CompatibilityDiagnostics {
                                 ? "direct WindowContainerTransaction fallback"
                         : taskControl
                                 ? "privileged transaction backend unavailable"
-                                : "Shizuku runtime unavailable");
-        appendCheck(report, "NUBIA-INPUT-001",
-                hasPackage(context, "cn.nubia.keymapcenter"),
-                "Nubia mirror input package", "cn.nubia.keymapcenter");
-        appendCheck(report, "NUBIA-LAUNCHER-001",
-                hasPackage(context, "com.zte.mifavor.launcher"),
-                "ZTE launcher package", "com.zte.mifavor.launcher");
+                                : "root access unavailable");
+        final boolean bridgeConnected = LineDexBridgeClient.isConnected();
+        final Bundle bridgeState = LineDexBridgeClient.state();
+        final boolean desktopEnabled = bridgeState.getBoolean(
+                "desktopEnabled", false);
+        final int externalDisplayId = bridgeState.getInt(
+                "externalDisplayId", -1);
+        final int requestedPointerDisplayId = bridgeState.getInt(
+                "pointerDisplayId", -1);
+        final int appliedPointerDisplayId = bridgeState.getInt(
+                "appliedPointerDisplayId", -1);
+        appendCheck(report, "XPOSED-BRIDGE-001", bridgeConnected,
+                "LSPosed system bridge",
+                bridgeConnected
+                        ? "connected, interface="
+                                + LineDexBridgeClient.interfaceVersion()
+                        : "not connected; verify module scope and reboot");
         final boolean globalInput = ShellAccess.isReady();
         appendCheck(report, "SHORTCUTS-001",
                 !globalInput || KeyboardShortcutWatcher.isFullShortcutMode(),
@@ -249,35 +262,33 @@ final class CompatibilityDiagnostics {
                 globalInput
                         ? (KeyboardShortcutWatcher.isFullShortcutMode()
                                 ? "running" : "not running")
-                        : "Shizuku runtime unavailable");
-        final boolean shellRightClick = ShellAccess.isReady();
-        final boolean mouseBridgeExpected =
-                shellRightClick
-                        && Settings.Global.getInt(
-                                context.getContentResolver(),
-                                "app_mirror_displayid",
-                                -1) > 0
-                        && hasExternalMouse();
-        final boolean mouseBridgeReady =
-                MagicDeskRuntimeService
-                        .isConsoleMouseBridgeReadyIfRunning();
-        final String mouseBridgeDetail;
-        if (!shellRightClick) {
-            mouseBridgeDetail =
-                    "Shizuku runtime unavailable";
-        } else if (!mouseBridgeExpected) {
-            mouseBridgeDetail =
-                    "idle; Console Mode and an external mouse are required";
+                        : "root access unavailable");
+        final boolean externalMouse = hasExternalMouse();
+        final boolean pointerExpected = bridgeConnected
+                && desktopEnabled
+                && externalDisplayId > Display.DEFAULT_DISPLAY
+                && externalMouse;
+        final boolean pointerApplied = appliedPointerDisplayId
+                == externalDisplayId;
+        final String pointerDetail;
+        if (!bridgeConnected) {
+            pointerDetail = "system bridge unavailable";
+        } else if (!desktopEnabled) {
+            pointerDetail = "desktop session disabled";
+        } else if (externalDisplayId <= Display.DEFAULT_DISPLAY) {
+            pointerDetail = "external display unavailable";
+        } else if (!externalMouse) {
+            pointerDetail = "no physical external mouse detected";
         } else {
-            mouseBridgeDetail =
-                    mouseBridgeReady ? "running" : "not running";
+            pointerDetail = "requested=" + requestedPointerDisplayId
+                    + ", applied=" + appliedPointerDisplayId
+                    + ", external=" + externalDisplayId;
         }
         appendCheck(report, "INPUT-MOUSE-001",
-                !mouseBridgeExpected
-                        || mouseBridgeReady,
-                "Global right-click bridge",
-                mouseBridgeDetail);
-        report.append("Shell command access: ")
+                !pointerExpected || pointerApplied,
+                "Physical mouse display routing",
+                pointerDetail);
+        report.append("Root command access: ")
                 .append(ShellAccess.isReady()).append('\n');
         report.append("REDMAGIC charge separation: package=")
                 .append(ChargeSeparationController.isSupported(context))
@@ -301,9 +312,11 @@ final class CompatibilityDiagnostics {
                 .append(", batteryMilliC=")
                 .append(hardware.batteryMilliCelsius)
                 .append('\n');
-        report.append("Console display setting: ")
-                .append(Settings.Global.getString(
-                        context.getContentResolver(), "app_mirror_displayid"))
+        report.append("LineDEX bridge state: desktop=")
+                .append(desktopEnabled)
+                .append(", externalDisplayId=").append(externalDisplayId)
+                .append(", pointerRequested=").append(requestedPointerDisplayId)
+                .append(", pointerApplied=").append(appliedPointerDisplayId)
                 .append("\n\n");
     }
 
@@ -335,13 +348,13 @@ final class CompatibilityDiagnostics {
         report.append('\n');
     }
 
-    private static void appendShizukuProbe(
+    private static void appendRootProbe(
             final StringBuilder report,
             final DeviceSetupManager.Audit audit) {
         if (!audit.shellReady) {
             return;
         }
-        report.append("## Shizuku capability probe\n");
+        report.append("## Root capability probe\n");
         try {
             report.append(ShellAccess.probeCapabilities());
         } catch (IOException | RuntimeException error) {
@@ -413,8 +426,8 @@ final class CompatibilityDiagnostics {
         report.append('\n');
     }
 
-    private static void appendMagicDeskLogcat(final StringBuilder report) {
-        report.append("## Recent MagicDesk logcat\n");
+    private static void appendLineDexLogcat(final StringBuilder report) {
+        report.append("## Recent LineDEX logcat\n");
         final String command = "/system/bin/logcat -d -v threadtime -t 600 "
                 + "MagicDesk:V MagicDeskConsoleSwitcher:V MagicDeskFreeform:V "
                 + "MagicDeskNativeDesktop:V MagicDeskNotifications:V MagicDeskPanels:V "
@@ -422,7 +435,7 @@ final class CompatibilityDiagnostics {
                 + "MagicDeskSetup:V MagicDeskTaskReuse:V MagicDeskTasks:V "
                 + "MagicDeskWallpaper:V MagicDeskWatcher:V '*:S'";
         final String output = runCommand(command, MAX_LOGCAT_CHARS);
-        report.append(output.isEmpty() ? "No MagicDesk log entries available\n" : output);
+        report.append(output.isEmpty() ? "No LineDEX log entries available\n" : output);
         if (!output.endsWith("\n")) {
             report.append('\n');
         }
@@ -440,16 +453,6 @@ final class CompatibilityDiagnostics {
     private static String expectedValue(final String expected, final String actual) {
         return "expected=" + expected + ", actual="
                 + (TextUtils.isEmpty(actual) ? "<empty>" : actual);
-    }
-
-    private static boolean hasPackage(final Context context, final String packageName) {
-        try {
-            context.getPackageManager().getApplicationInfo(
-                    packageName, PackageManager.MATCH_DISABLED_COMPONENTS);
-            return true;
-        } catch (PackageManager.NameNotFoundException e) {
-            return false;
-        }
     }
 
     private static String appVersion(final Context context) {
@@ -531,7 +534,7 @@ final class CompatibilityDiagnostics {
 
         @Override
         public void uncaughtException(final Thread thread, final Throwable error) {
-            record("CRASH-001", "MagicDesk terminated unexpectedly",
+            record("CRASH-001", "LineDEX terminated unexpectedly",
                     "thread=" + (thread == null ? "unknown" : thread.getName()), error);
             if (mPrevious != null) {
                 mPrevious.uncaughtException(thread, error);

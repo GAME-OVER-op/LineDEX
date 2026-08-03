@@ -87,6 +87,9 @@ public final class LineDexBridgeService extends Service {
                     } catch (RemoteException error) {
                         Log.w(TAG, "Cannot restore LineDEX bridge state", error);
                         throw error;
+                    } catch (RuntimeException error) {
+                        Log.w(TAG, "Cannot restore LineDEX bridge state", error);
+                        throw new RemoteException(error.getMessage());
                     }
                 }
             };
@@ -131,7 +134,7 @@ public final class LineDexBridgeService extends Service {
                     LineDexSessionCoordinator.startOnExternalDisplay(
                             LineDexBridgeService.this, displayId);
                 }
-            } catch (RemoteException error) {
+            } catch (RemoteException | RuntimeException error) {
                 Log.w(TAG, "Could not synchronize desktop state", error);
             }
         });

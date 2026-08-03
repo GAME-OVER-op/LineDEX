@@ -1,93 +1,55 @@
 package com.linedex.desktop;
 
-import android.content.ComponentName;
 import android.content.Context;
-import android.content.Intent;
-import android.content.ServiceConnection;
-import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageManager;
 import android.graphics.Rect;
-import android.net.Uri;
-import android.os.Binder;
-import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
+import android.util.Base64;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.Closeable;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 
-import rikka.shizuku.Shizuku;
-
+/**
+ * Root-only command backend used by LineDEX.
+ *
+ * <p>The application process never assumes that Android permissions are elevated merely
+ * because root is available. Every privileged shell operation is executed through the
+ * device's {@code su} implementation. LSPosed-only framework calls remain inside
+ * {@code system_server}.</p>
+ */
 final class ShellAccess {
-    static final int REQUEST_PERMISSION_CODE = 7104;
-    static final int SHELL_UID = 2000;
-    static final String MANAGER_PACKAGE = "moe.shizuku.privileged.api";
-    private static final String DOWNLOAD_URL = "https://shizuku.rikka.app/download/";
-    private static final long BIND_TIMEOUT_MILLIS = 10_000;
-    private static final Object LOCK = new Object();
-    private static final AtomicLong NEXT_STREAM_ID =
-            new AtomicLong();
+    static final int ROOT_UID = 0;
+    private static final long PROBE_TIMEOUT_MILLIS = 15_000L;
+    private static final long TASK_POLL_INTERVAL_MILLIS = 700L;
     private static final Set<StateListener> STATE_LISTENERS =
             new CopyOnWriteArraySet<>();
 
-    private static IShizukuCommandService sService;
-    private static boolean sBinding;
-    private static boolean sInitialized;
+    private static volatile boolean sInitialized;
+    private static volatile String sSuBinary = "su";
     private static volatile Snapshot sSnapshot = Snapshot.unavailable(
-            false, "Shizuku access is not initialized");
+            false, "Root access is not initialized");
 
     interface StateListener {
         void onShellStateChanged(Snapshot snapshot);
     }
-
-    private static final Shizuku.OnBinderReceivedListener BINDER_RECEIVED = () -> {
-        clearService();
-        refresh();
-    };
-    private static final Shizuku.OnBinderDeadListener BINDER_DEAD = () -> {
-        clearService();
-        publish(Snapshot.unavailable(
-                sSnapshot.installed,
-                "Shizuku server is not running"));
-    };
-    private static final Shizuku.OnRequestPermissionResultListener
-            PERMISSION_RESULT = (requestCode, grantResult) -> {
-                if (requestCode == REQUEST_PERMISSION_CODE) {
-                    refresh();
-                }
-            };
-
-    private static final ServiceConnection CONNECTION = new ServiceConnection() {
-        @Override
-        public void onServiceConnected(
-                final ComponentName componentName, final IBinder binder) {
-            synchronized (LOCK) {
-                sService = binder != null && binder.pingBinder()
-                        ? IShizukuCommandService.Stub.asInterface(binder) : null;
-                sBinding = false;
-                LOCK.notifyAll();
-            }
-            // The Shizuku server may already be ready while its UserService is
-            // still starting. Notify setup/runtime listeners once the command
-            // Binder arrives so a transient startup audit is not left on screen.
-            publish(inspectNow());
-        }
-
-        @Override
-        public void onServiceDisconnected(final ComponentName componentName) {
-            synchronized (LOCK) {
-                sService = null;
-                sBinding = false;
-                LOCK.notifyAll();
-            }
-        }
-    };
 
     private ShellAccess() {
     }
@@ -97,10 +59,9 @@ final class ShellAccess {
             return;
         }
         sInitialized = true;
-        Shizuku.addBinderReceivedListenerSticky(BINDER_RECEIVED);
-        Shizuku.addBinderDeadListener(BINDER_DEAD);
-        Shizuku.addRequestPermissionResultListener(PERMISSION_RESULT);
-        refresh();
+        final Thread probe = new Thread(ShellAccess::refresh, "LineDexRootProbe");
+        probe.setDaemon(true);
+        probe.start();
     }
 
     static boolean isReady() {
@@ -108,7 +69,10 @@ final class ShellAccess {
     }
 
     static String statusLabel() {
-        return isReady() ? "ready" : "unavailable";
+        final Snapshot snapshot = sSnapshot;
+        return snapshot.isReady()
+                ? "root ready"
+                : snapshot.error.isEmpty() ? "root unavailable" : snapshot.error;
     }
 
     static void addStateListener(final StateListener listener) {
@@ -128,166 +92,205 @@ final class ShellAccess {
     }
 
     private static Snapshot inspectNow() {
-        final Context context = MagicDeskApplication.applicationContext();
-        if (context == null) {
-            return Snapshot.unavailable(false, "Shizuku access is not initialized");
+        final String su = findSuBinary();
+        if (su == null) {
+            return Snapshot.unavailable(false, "su binary was not found");
         }
-        final boolean installed = isManagerInstalled(context);
+        sSuBinary = su;
+        Process process = null;
         try {
-            if (!Shizuku.pingBinder()) {
-                return Snapshot.unavailable(installed,
-                        installed
-                                ? "Shizuku is installed but its server is not running"
-                                : "Shizuku is not installed");
-            }
-            final int version = Shizuku.getVersion();
-            if (version < 11) {
+            process = new ProcessBuilder(
+                    su,
+                    "-c",
+                    "/system/bin/id -u; "
+                            + "/system/bin/id -Z 2>/dev/null || true")
+                    .redirectErrorStream(true)
+                    .start();
+            final BoundedProcessRunner.Result result = BoundedProcessRunner.run(
+                    process, PROBE_TIMEOUT_MILLIS, 64 * 1024);
+            final String[] lines = result.output.trim().split("\\r?\\n");
+            final int uid = lines.length == 0 ? -1 : parseInt(lines[0], -1);
+            if (result.exitCode != 0) {
                 return new Snapshot(
-                        installed, true, false, -1, version,
-                        "Shizuku API 11 or newer is required");
+                        true, true, false, uid, 1,
+                        "Root request failed (exit " + result.exitCode + "): "
+                                + result.output.trim());
             }
-            final int uid = Shizuku.getUid();
-            final boolean permissionGranted =
-                    Shizuku.checkSelfPermission()
-                            == PackageManager.PERMISSION_GRANTED;
-            final String error;
-            if (!permissionGranted) {
-                error = "Shizuku permission is not granted";
-            } else if (uid != SHELL_UID) {
-                error = "Shizuku must run as shell UID 2000; found UID " + uid;
-            } else {
-                error = "";
+            if (uid != ROOT_UID) {
+                return new Snapshot(
+                        true, true, false, uid, 1,
+                        "Root was not granted; uid=" + uid);
             }
-            return new Snapshot(
-                    installed, true, permissionGranted, uid, version,
-                    error);
-        } catch (RuntimeException error) {
-            return Snapshot.unavailable(installed, usefulMessage(error));
+            return new Snapshot(true, true, true, uid, 1, "");
+        } catch (IOException error) {
+            return Snapshot.unavailable(true, usefulMessage(error));
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            return Snapshot.unavailable(true, "Root probe was interrupted");
+        } finally {
+            if (process != null) {
+                process.destroy();
+            }
         }
     }
 
     static int connectAndGetUid() throws IOException {
-        try {
-            return requireService().uid();
-        } catch (RemoteException | RuntimeException error) {
-            handleServiceFailure();
-            throw new IOException("Shizuku command service failed: "
-                    + usefulMessage(error), error);
+        final String output = run("/system/bin/id -u").trim();
+        final int uid = parseInt(output, -1);
+        if (uid != ROOT_UID) {
+            throw new IOException("root command returned uid=" + uid);
         }
+        return uid;
     }
 
     static String run(final String command) throws IOException {
-        final String encoded;
+        if (command == null || command.trim().isEmpty()) {
+            throw new IOException("empty root command");
+        }
+        requireRoot();
+        Process process = null;
         try {
-            encoded = requireService().execute(command);
-        } catch (RemoteException | RuntimeException error) {
-            handleServiceFailure();
-            throw new IOException("Shizuku command service failed: "
-                    + usefulMessage(error), error);
+            process = startRootProcess(command);
+            final BoundedProcessRunner.Result result =
+                    BoundedProcessRunner.run(process);
+            if (result.exitCode != 0) {
+                throw new IOException(
+                        "root command failed " + result.exitCode + ": "
+                                + result.output.trim());
+            }
+            return result.output;
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IOException("root command interrupted", error);
+        } finally {
+            if (process != null) {
+                process.destroy();
+            }
         }
-        final int separator = encoded == null ? -1 : encoded.indexOf('\n');
-        if (separator <= 0) {
-            throw new IOException("invalid response from Shizuku command service");
-        }
-        final int exitCode;
-        try {
-            exitCode = Integer.parseInt(encoded.substring(0, separator));
-        } catch (NumberFormatException error) {
-            throw new IOException("invalid Shizuku command exit code", error);
-        }
-        final String output = encoded.substring(separator + 1);
-        if (exitCode != 0) {
-            throw new IOException("Shizuku command failed " + exitCode + ": "
-                    + output.trim());
-        }
-        return output;
     }
 
     static String probeCapabilities() throws IOException {
-        try {
-            final String report = requireService().probeCapabilities();
-            if (report == null || report.isEmpty()) {
-                throw new IOException("Shizuku capability probe returned no report");
-            }
-            return report;
-        } catch (RemoteException | RuntimeException error) {
-            handleServiceFailure();
-            throw new IOException("Shizuku capability probe failed: "
-                    + usefulMessage(error), error);
-        }
+        return run(
+                "printf 'format=2\\n'; "
+                        + "printf 'backend=root\\n'; "
+                        + "printf 'identity.uid='; /system/bin/id -u; "
+                        + "printf 'identity.gid='; /system/bin/id -g; "
+                        + "printf 'identity.groups='; /system/bin/id -G; "
+                        + "printf 'identity.selinux='; "
+                        + "/system/bin/id -Z 2>/dev/null || true; "
+                        + "printf 'access.dev_input='; "
+                        + "if ls /dev/input/event* >/dev/null 2>&1; then echo yes; else echo no; fi; "
+                        + "printf 'access.uinput='; "
+                        + "if [ -r /dev/uinput ] && [ -w /dev/uinput ]; then echo rw; "
+                        + "elif [ -e /dev/uinput ]; then echo denied; else echo missing; fi; "
+                        + "printf 'tool.settings='; command -v settings || true; "
+                        + "printf 'tool.wm='; command -v wm || true; "
+                        + "printf 'tool.am='; command -v am || true; "
+                        + "printf 'tool.cmd='; command -v cmd || true; "
+                        + "printf 'tool.dumpsys='; command -v dumpsys || true");
     }
 
     static String updateHardwareKeyboardLayout(
             final String mode,
-            final String currentDescriptor)
-            throws IOException {
-        try {
-            return requireService().updateHardwareKeyboardLayout(
-                    mode, currentDescriptor);
-        } catch (RemoteException error) {
-            handleServiceFailure();
-            throw new IOException(
-                    "Shizuku keyboard layout update failed: "
-                            + usefulMessage(error),
-                    error);
-        } catch (RuntimeException error) {
-            handleServiceFailure();
-            throw new IOException(
-                    "Shizuku keyboard layout update failed: "
-                            + usefulMessage(error),
-                    error);
+            final String currentDescriptor) throws IOException {
+        final Context context = MagicDeskApplication.applicationContext();
+        if (context == null) {
+            throw new IOException("application context is unavailable");
         }
+        final StringBuilder command = new StringBuilder();
+        command.append("CLASSPATH=")
+                .append(shellQuote(context.getApplicationInfo().sourceDir))
+                .append(" /system/bin/app_process /system/bin ")
+                .append(HardwareKeyboardLayoutCommand.class.getName())
+                .append(' ').append(shellQuote(mode));
+        if (currentDescriptor != null && !currentDescriptor.isEmpty()) {
+            command.append(' ').append(shellQuote(currentDescriptor));
+        }
+        final String output = run(command.toString());
+        if (!"catalog".equals(mode)) {
+            final String descriptor = field(output, "descriptor");
+            final String code = field(output, "code");
+            final String name64 = field(output, "name64");
+            final String name;
+            try {
+                name = new String(
+                        Base64.decode(name64, Base64.DEFAULT),
+                        StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException error) {
+                throw new IOException("invalid keyboard layout response", error);
+            }
+            run("/system/bin/settings put global "
+                    + HardwareKeyboardLayoutController.LAYOUT_LABEL_STATE + " "
+                    + shellQuote(code) + "; "
+                    + "/system/bin/settings put global "
+                    + HardwareKeyboardLayoutController.LAYOUT_NAME_STATE + " "
+                    + shellQuote(name) + "; "
+                    + "/system/bin/settings put global "
+                    + HardwareKeyboardLayoutController.LAYOUT_STATE + " "
+                    + shellQuote(descriptor));
+        }
+        return output;
     }
 
     static boolean capturePointerPosition() {
-        if (!isReady()) {
-            return false;
-        }
-        try {
-            return requireService().capturePointerPosition();
-        } catch (IOException | RemoteException | RuntimeException error) {
-            handleServiceFailure();
-            return false;
-        }
+        // Physical cursor ownership is handled by the system_server pointer override.
+        return false;
     }
 
     static void restorePointerPositionIfDisplaced() {
-        if (!isReady()) {
-            return;
-        }
-        try {
-            requireService().restorePointerPositionIfDisplaced();
-        } catch (IOException | RemoteException | RuntimeException error) {
-            handleServiceFailure();
-        }
+        // No legacy Nubia uinput cursor is used in the root-only backend.
     }
 
     static ParcelFileDescriptor openSystemWallpaper() throws IOException {
-        try {
-            final ParcelFileDescriptor descriptor =
-                    requireService().openSystemWallpaper();
-            if (descriptor == null) {
-                throw new IOException(
-                        "Shizuku command service returned no wallpaper");
+        requireRoot();
+        final ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
+        final ParcelFileDescriptor readSide = pipe[0];
+        final ParcelFileDescriptor writeSide = pipe[1];
+        final Thread copyThread = new Thread(() -> {
+            Process process = null;
+            try (OutputStream output =
+                         new ParcelFileDescriptor.AutoCloseOutputStream(writeSide)) {
+                process = startRootProcess(
+                        "user=$(/system/bin/cmd activity get-current-user 2>/dev/null || echo 0); "
+                                + "for f in /data/system/users/$user/wallpaper "
+                                + "/data/system/users/0/wallpaper; do "
+                                + "if [ -r \"$f\" ]; then cat \"$f\"; exit 0; fi; done; exit 1");
+                try (InputStream input = new BufferedInputStream(process.getInputStream())) {
+                    copy(input, output);
+                }
+                process.waitFor(15, TimeUnit.SECONDS);
+            } catch (IOException ignored) {
+                // The reader receives EOF when wallpaper access is unavailable.
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            } finally {
+                if (process != null) {
+                    process.destroy();
+                }
             }
-            return descriptor;
-        } catch (RemoteException | RuntimeException error) {
-            handleServiceFailure();
-            throw new IOException(
-                    "Shizuku wallpaper read failed: "
-                            + usefulMessage(error),
-                    error);
-        }
+        }, "LineDexRootWallpaper");
+        copyThread.setDaemon(true);
+        copyThread.start();
+        return readSide;
     }
 
     static StreamHandle openOwnedStream(final String command)
             throws IOException {
-        return openStream(command, false);
+        return openStream(command);
     }
 
     static StreamHandle openHeartbeatStream(final String command)
             throws IOException {
-        return openStream(command, true);
+        return openStream(command);
+    }
+
+    private static StreamHandle openStream(final String command)
+            throws IOException {
+        if (command == null || command.trim().isEmpty()) {
+            throw new IOException("empty root stream command");
+        }
+        requireRoot();
+        return new StreamHandle(startRootProcess(command));
     }
 
     static TaskObserverHandle openTaskObserver(
@@ -296,167 +299,75 @@ final class ShellAccess {
         if (callback == null) {
             throw new IOException("missing task observer callback");
         }
-        final IShizukuCommandService service = requireService();
-        final TaskObserverHandle handle = new TaskObserverHandle(
-                service, callback, disconnected);
-        try {
-            handle.start();
-            return handle;
-        } catch (RemoteException error) {
-            handle.closeAfterStartFailure();
-            handleServiceFailure();
-            throw new IOException(
-                    "Shizuku task observer failed: "
-                            + usefulMessage(error),
-                    error);
-        } catch (RuntimeException error) {
-            handle.closeAfterStartFailure();
-            throw new IOException(
-                    "Shizuku task observer failed: "
-                            + usefulMessage(error),
-                    error);
-        }
-    }
-
-    private static StreamHandle openStream(
-            final String command,
-            final boolean heartbeatEnabled) throws IOException {
-        if (command == null || command.isEmpty()) {
-            throw new IOException("empty Shizuku stream command");
-        }
-        final long requestId = NEXT_STREAM_ID.incrementAndGet();
-        final IBinder ownerToken = new Binder();
-        try {
-            final IShizukuCommandService service = requireService();
-            final ParcelFileDescriptor descriptor;
-            if (heartbeatEnabled) {
-                descriptor = service.openHeartbeatStream(
-                        command, requestId, ownerToken);
-            } else {
-                descriptor = service.openOwnedStream(
-                        command, requestId, ownerToken);
-            }
-            if (descriptor == null) {
-                throw new IOException(
-                        "Shizuku command service returned no stream");
-            }
-            return new StreamHandle(
-                    requestId,
-                    descriptor,
-                    ownerToken,
-                    service);
-        } catch (RemoteException | RuntimeException error) {
-            handleServiceFailure();
-            throw new IOException("Shizuku command stream failed: "
-                    + usefulMessage(error), error);
-        }
+        requireRoot();
+        final TaskObserverHandle handle = new TaskObserverHandle(callback, disconnected);
+        handle.start();
+        return handle;
     }
 
     static void requestPermission() {
         final Snapshot snapshot = refresh();
-        if (!snapshot.running) {
+        if (!snapshot.isReady()) {
             throw new IllegalStateException(snapshot.error);
         }
-        Shizuku.requestPermission(REQUEST_PERMISSION_CODE);
     }
 
     static void openManagerOrWebsite(final Context context) {
-        final Intent manager =
-                context.getPackageManager().getLaunchIntentForPackage(MANAGER_PACKAGE);
-        if (manager != null) {
-            context.startActivity(manager.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-            return;
-        }
-        context.startActivity(new Intent(
-                Intent.ACTION_VIEW, Uri.parse(DOWNLOAD_URL)));
+        final Thread probe = new Thread(ShellAccess::refresh, "LineDexRootRequest");
+        probe.setDaemon(true);
+        probe.start();
     }
 
     static void disconnect() {
-        synchronized (LOCK) {
-            if (!sBinding && sService == null) {
-                return;
+        // Root commands are short-lived. There is no external service to disconnect.
+    }
+
+    private static void requireRoot() throws IOException {
+        final Snapshot snapshot = sSnapshot;
+        if (!snapshot.isReady()) {
+            final Snapshot refreshed = refresh();
+            if (!refreshed.isReady()) {
+                throw new IOException(refreshed.error.isEmpty()
+                        ? "root access is unavailable" : refreshed.error);
+            }
+        }
+    }
+
+    private static Process startRootProcess(final String command)
+            throws IOException {
+        return new ProcessBuilder(sSuBinary, "-c", command)
+                .redirectErrorStream(true)
+                .start();
+    }
+
+    private static String findSuBinary() {
+        final String[] candidates = {
+                "/system/bin/su",
+                "/system/xbin/su",
+                "/sbin/su",
+                "/debug_ramdisk/su"
+        };
+        for (final String candidate : candidates) {
+            final File file = new File(candidate);
+            if (file.isFile() && file.canExecute()) {
+                return candidate;
             }
         }
         try {
-            if (Shizuku.pingBinder()) {
-                Shizuku.unbindUserService(userServiceArgs(), CONNECTION, true);
-            }
-        } catch (RuntimeException ignored) {
-            // The server may already be gone.
-        } finally {
-            clearService();
+            final Process process = new ProcessBuilder(
+                    "/system/bin/sh", "-c", "command -v su")
+                    .redirectErrorStream(true)
+                    .start();
+            final BoundedProcessRunner.Result result = BoundedProcessRunner.run(
+                    process, 3_000L, 8 * 1024);
+            final String path = result.output.trim();
+            return result.exitCode == 0 && !path.isEmpty() ? path : null;
+        } catch (IOException error) {
+            return null;
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            return null;
         }
-    }
-
-    private static IShizukuCommandService requireService() throws IOException {
-        final Snapshot snapshot = sSnapshot;
-        if (!snapshot.isReady()) {
-            throw new IOException(snapshot.error.isEmpty()
-                    ? "Shizuku shell access is unavailable" : snapshot.error);
-        }
-        synchronized (LOCK) {
-            if (sService != null) {
-                return sService;
-            }
-            final long deadline =
-                    android.os.SystemClock.uptimeMillis() + BIND_TIMEOUT_MILLIS;
-            while (sService == null) {
-                if (!sBinding) {
-                    sBinding = true;
-                    try {
-                        Shizuku.bindUserService(userServiceArgs(), CONNECTION);
-                    } catch (RuntimeException error) {
-                        sBinding = false;
-                        throw new IOException(
-                                "could not bind Shizuku command service: "
-                                        + usefulMessage(error),
-                                error);
-                    }
-                }
-                final long remaining =
-                        deadline - android.os.SystemClock.uptimeMillis();
-                if (remaining <= 0) {
-                    sBinding = false;
-                    throw new IOException("timed out binding Shizuku command service");
-                }
-                try {
-                    LOCK.wait(remaining);
-                } catch (InterruptedException error) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException(
-                            "interrupted while binding Shizuku command service",
-                            error);
-                }
-            }
-            return sService;
-        }
-    }
-
-    private static Shizuku.UserServiceArgs userServiceArgs() {
-        final Context context = MagicDeskApplication.applicationContext();
-        if (context == null) {
-            throw new IllegalStateException("Shizuku access is not initialized");
-        }
-        return new Shizuku.UserServiceArgs(new ComponentName(
-                context.getPackageName(), ShizukuCommandService.class.getName()))
-                .daemon(false)
-                .processNameSuffix("shizuku")
-                .debuggable((context.getApplicationInfo().flags
-                        & ApplicationInfo.FLAG_DEBUGGABLE) != 0)
-                .version(appVersionCode(context));
-    }
-
-    private static void clearService() {
-        synchronized (LOCK) {
-            sService = null;
-            sBinding = false;
-            LOCK.notifyAll();
-        }
-    }
-
-    private static void handleServiceFailure() {
-        clearService();
-        refresh();
     }
 
     private static synchronized Snapshot publish(final Snapshot snapshot) {
@@ -471,33 +382,44 @@ final class ShellAccess {
         return snapshot;
     }
 
-    private static boolean isManagerInstalled(final Context context) {
+    private static String field(final String output, final String name)
+            throws IOException {
+        final String prefix = name + "=";
+        for (final String line : output.split("\\r?\\n")) {
+            if (line.startsWith(prefix)) {
+                return line.substring(prefix.length());
+            }
+        }
+        throw new IOException("missing " + name + " in command response");
+    }
+
+    private static int parseInt(final String value, final int fallback) {
         try {
-            context.getPackageManager().getPackageInfo(
-                    MANAGER_PACKAGE, PackageManager.PackageInfoFlags.of(0));
-            return true;
-        } catch (PackageManager.NameNotFoundException error) {
-            return false;
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException error) {
+            return fallback;
         }
     }
 
-    private static int appVersionCode(final Context context) {
-        try {
-            final long versionCode = context.getPackageManager()
-                    .getPackageInfo(
-                            context.getPackageName(),
-                            PackageManager.PackageInfoFlags.of(0))
-                    .getLongVersionCode();
-            return (int) Math.min(Integer.MAX_VALUE, versionCode);
-        } catch (PackageManager.NameNotFoundException error) {
-            return 1;
-        }
+    private static String shellQuote(final String value) {
+        final String safe = value == null ? "" : value;
+        return "'" + safe.replace("'", "'\"'\"'") + "'";
     }
 
     private static String usefulMessage(final Throwable error) {
         final String message = error.getMessage();
         return message == null || message.isEmpty()
                 ? error.getClass().getSimpleName() : message;
+    }
+
+    private static void copy(final InputStream input, final OutputStream output)
+            throws IOException {
+        final byte[] buffer = new byte[16 * 1024];
+        int count;
+        while ((count = input.read(buffer)) >= 0) {
+            output.write(buffer, 0, count);
+        }
+        output.flush();
     }
 
     static final class Snapshot {
@@ -525,14 +447,11 @@ final class ShellAccess {
 
         static Snapshot unavailable(
                 final boolean installed, final String error) {
-            return new Snapshot(installed, false, false, -1, -1, error);
+            return new Snapshot(installed, false, false, -1, 1, error);
         }
 
         boolean isReady() {
-            return running
-                    && permissionGranted
-                    && uid == SHELL_UID
-                    && version >= 11;
+            return running && permissionGranted && uid == ROOT_UID;
         }
 
         private boolean sameState(final Snapshot other) {
@@ -547,23 +466,16 @@ final class ShellAccess {
     }
 
     static final class StreamHandle implements Closeable {
-        private final long mRequestId;
+        private final Process mProcess;
         private final InputStream mInput;
-        // Keep the local Binder alive while the UserService owns this stream.
-        @SuppressWarnings("unused")
-        private final IBinder mOwnerToken;
-        private final IShizukuCommandService mService;
+        private final BufferedWriter mWriter;
         private final AtomicBoolean mClosed = new AtomicBoolean();
 
-        StreamHandle(
-                final long requestId,
-                final ParcelFileDescriptor descriptor,
-                final IBinder ownerToken,
-                final IShizukuCommandService service) {
-            mRequestId = requestId;
-            mInput = new ParcelFileDescriptor.AutoCloseInputStream(descriptor);
-            mOwnerToken = ownerToken;
-            mService = service;
+        StreamHandle(final Process process) {
+            mProcess = process;
+            mInput = process.getInputStream();
+            mWriter = new BufferedWriter(new OutputStreamWriter(
+                    process.getOutputStream(), StandardCharsets.UTF_8));
         }
 
         InputStream inputStream() {
@@ -572,16 +484,11 @@ final class ShellAccess {
 
         void writeLine(final String line) throws IOException {
             if (mClosed.get()) {
-                throw new IOException("Shizuku stream is closed");
+                throw new IOException("root stream is closed");
             }
-            try {
-                mService.writeStream(mRequestId, line);
-            } catch (RemoteException | RuntimeException error) {
-                throw new IOException(
-                        "Shizuku stream write failed: "
-                                + usefulMessage(error),
-                        error);
-            }
+            mWriter.write(line == null ? "" : line);
+            mWriter.newLine();
+            mWriter.flush();
         }
 
         @Override
@@ -590,57 +497,48 @@ final class ShellAccess {
                 return;
             }
             try {
+                mWriter.close();
+            } catch (IOException ignored) {
+                // Process termination is authoritative.
+            }
+            try {
                 mInput.close();
             } catch (IOException ignored) {
-                // The remote stream may already have ended.
+                // Process termination is authoritative.
             }
-
+            mProcess.destroy();
             try {
-                mService.closeStream(mRequestId);
-            } catch (RemoteException | RuntimeException ignored) {
-                // Closing a disconnected UserService is already complete.
+                if (!mProcess.waitFor(500, TimeUnit.MILLISECONDS)) {
+                    mProcess.destroyForcibly();
+                }
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                mProcess.destroyForcibly();
             }
         }
     }
 
-    static final class TaskObserverHandle implements Closeable {
-        private final IShizukuCommandService mService;
-        private final IBinder mServiceBinder;
+    static final class TaskObserverHandle implements Closeable, Runnable {
         private final ITaskObserverCallback mCallback;
         private final Runnable mDisconnected;
-        private final IBinder.DeathRecipient mServiceDeathRecipient;
         private final AtomicBoolean mClosed = new AtomicBoolean();
+        private final Thread mThread;
 
-        private volatile boolean mRegistered;
-        private boolean mServiceLinked;
+        private volatile int mDisplayId = -1;
+        private volatile Rect mDisplayBounds = new Rect();
+        private volatile Rect mWorkAreaBounds = new Rect();
 
         TaskObserverHandle(
-                final IShizukuCommandService service,
                 final ITaskObserverCallback callback,
                 final Runnable disconnected) {
-            mService = service;
-            mServiceBinder = service.asBinder();
             mCallback = callback;
             mDisconnected = disconnected;
-            mServiceDeathRecipient = this::serviceDisconnected;
+            mThread = new Thread(this, "LineDexRootTaskObserver");
+            mThread.setDaemon(true);
         }
 
-        void start() throws RemoteException {
-            mServiceBinder.linkToDeath(mServiceDeathRecipient, 0);
-            synchronized (this) {
-                mServiceLinked = true;
-            }
-            mService.startTaskObserver(mCallback);
-            if (mClosed.get()) {
-                try {
-                    mService.stopTaskObserver(mCallback);
-                } catch (RemoteException | RuntimeException ignored) {
-                    // The service disconnected while registering the observer.
-                }
-                throw new RemoteException(
-                        "task observer disconnected during registration");
-            }
-            mRegistered = true;
+        void start() {
+            mThread.start();
         }
 
         void configure(
@@ -650,25 +548,48 @@ final class ShellAccess {
             if (displayBounds == null || workAreaBounds == null) {
                 throw new IOException("missing task observer bounds");
             }
-            callService(() -> mService.configureTaskObserver(
-                    mCallback,
-                    displayId,
-                    displayBounds.left,
-                    displayBounds.top,
-                    displayBounds.right,
-                    displayBounds.bottom,
-                    workAreaBounds.left,
-                    workAreaBounds.top,
-                    workAreaBounds.right,
-                    workAreaBounds.bottom));
+            mDisplayId = displayId;
+            mDisplayBounds = new Rect(displayBounds);
+            mWorkAreaBounds = new Rect(workAreaBounds);
         }
 
         void focusStack(
                 final long sequence,
                 final int displayId,
                 final int[] taskIds) throws IOException {
-            callService(() -> mService.focusTaskStack(
-                    mCallback, sequence, displayId, taskIds));
+            if (taskIds == null || taskIds.length == 0) {
+                throw new IOException("empty task stack");
+            }
+            final Context context = MagicDeskApplication.applicationContext();
+            if (context == null) {
+                throw new IOException("application context is unavailable");
+            }
+            final StringBuilder command = new StringBuilder();
+            command.append("CLASSPATH=")
+                    .append(shellQuote(context.getApplicationInfo().sourceDir))
+                    .append(" /system/bin/app_process /system/bin ")
+                    .append(TaskControlCommand.class.getName())
+                    .append(" focus-stack");
+            for (final int taskId : taskIds) {
+                command.append(' ').append(taskId);
+            }
+            int count = 0;
+            String error = "";
+            boolean success = false;
+            try {
+                run(command.toString());
+                count = taskIds.length;
+                success = true;
+            } catch (IOException failure) {
+                error = usefulMessage(failure);
+            }
+            try {
+                mCallback.onFocusStackResult(
+                        sequence, success, count, error);
+            } catch (RemoteException failure) {
+                close();
+                throw new IOException("task observer callback failed", failure);
+            }
         }
 
         boolean isClosed() {
@@ -676,83 +597,44 @@ final class ShellAccess {
         }
 
         @Override
+        public void run() {
+            String previous = "";
+            try {
+                while (!mClosed.get()) {
+                    final String current = run(
+                            "/system/bin/dumpsys activity activities 2>/dev/null | "
+                                    + "/system/bin/grep -E "
+                                    + "'Task\\{|mResumedActivity|mFocusedApp|mTopResumedActivity' "
+                                    + "|| true");
+                    if (!current.equals(previous)) {
+                        previous = current;
+                        mCallback.onTasksChanged();
+                    }
+                    Thread.sleep(TASK_POLL_INTERVAL_MILLIS);
+                }
+            } catch (RemoteException error) {
+                // The owning desktop process is gone.
+            } catch (IOException error) {
+                try {
+                    mCallback.onObserverError(usefulMessage(error));
+                } catch (RemoteException ignored) {
+                    // The callback is already gone.
+                }
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            } finally {
+                if (mClosed.compareAndSet(false, true) && mDisconnected != null) {
+                    mDisconnected.run();
+                }
+            }
+        }
+
+        @Override
         public void close() {
             if (!mClosed.compareAndSet(false, true)) {
                 return;
             }
-            unlinkServiceDeath();
-            if (!mRegistered) {
-                return;
-            }
-            mRegistered = false;
-            try {
-                mService.stopTaskObserver(mCallback);
-            } catch (RemoteException | RuntimeException ignored) {
-                // A disconnected service has already released its observer.
-            }
-        }
-
-        private void callService(final RemoteServiceCall call)
-                throws IOException {
-            if (mClosed.get()) {
-                throw new IOException("task observer is closed");
-            }
-            try {
-                call.run();
-            } catch (RemoteException error) {
-                serviceDisconnected();
-                throw new IOException(
-                        "task observer call failed: "
-                                + usefulMessage(error),
-                        error);
-            } catch (RuntimeException error) {
-                stopRemoteObserver();
-                serviceDisconnected();
-                throw new IOException(
-                        "task observer call failed: "
-                                + usefulMessage(error),
-                        error);
-            }
-        }
-
-        private void stopRemoteObserver() {
-            try {
-                mService.stopTaskObserver(mCallback);
-            } catch (RemoteException | RuntimeException ignored) {
-                // The observer may already have failed or disconnected.
-            }
-        }
-
-        private void closeAfterStartFailure() {
-            stopRemoteObserver();
-            if (!mClosed.compareAndSet(false, true)) {
-                return;
-            }
-            unlinkServiceDeath();
-        }
-
-        private void serviceDisconnected() {
-            if (!mClosed.compareAndSet(false, true)) {
-                return;
-            }
-            mRegistered = false;
-            unlinkServiceDeath();
-            if (mDisconnected != null) {
-                mDisconnected.run();
-            }
-        }
-
-        private synchronized void unlinkServiceDeath() {
-            if (!mServiceLinked) {
-                return;
-            }
-            mServiceBinder.unlinkToDeath(mServiceDeathRecipient, 0);
-            mServiceLinked = false;
-        }
-
-        @FunctionalInterface
-        private interface RemoteServiceCall {
-            void run() throws RemoteException;
+            mThread.interrupt();
         }
     }
 }

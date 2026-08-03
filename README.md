@@ -8,7 +8,7 @@ The first target is:
 - LineageOS 23.2 / Android 16 (SDK 36)
 - Revenge Xposed / LSPosed-compatible framework
 - USB-C DisplayPort monitor
-- Shizuku running as shell UID 2000
+- Root access through KernelSU, Magisk, or another compatible su implementation
 
 ## Current alpha scope
 
@@ -24,7 +24,7 @@ The repository contains a buildable single APK with:
 - monitor mode selection;
 - per-display DPI controls;
 - experimental phone-display power control;
-- Shizuku task-management backend;
+- root-only task, display, and command backend;
 - GitHub Actions for dev and signed release builds.
 
 This is an **alpha hardware-specific project**. The hooks use class names verified against the supplied LineageOS 23.2 firmware. A failed or changed hook should fail open and leave the phone display usable, but testing should be done with ADB/root access available.
@@ -36,7 +36,7 @@ Enable LineDEX for:
 1. **System Framework** (`system` / `android`)
 2. **System UI** (`com.android.systemui`)
 
-Then reboot. Open LineDEX on the phone, grant Shizuku access, prepare Android freeform settings, enable the desktop session, and only then connect the monitor.
+Then reboot. Open LineDEX on the phone, grant root access, prepare Android freeform settings, enable the desktop session, and only then connect the monitor.
 
 ## Build locally
 
@@ -102,7 +102,7 @@ Never commit either keystore.
 LineDEX APK
 ├── phone control activity
 ├── external SECONDARY_HOME desktop
-├── Shizuku task service
+├── Root command backend
 ├── typed AIDL bridge endpoint
 └── Xposed module
     ├── system_server
@@ -126,7 +126,7 @@ The system bridge:
 - restores display 0 and the default pointer target when the app endpoint dies;
 - does not register under or replace an existing Android Binder service name.
 
-Shizuku remains necessary for the inherited task/window management commands. It must run as shell UID 2000.
+All inherited task/window commands now run through a short-lived root backend. No Shizuku installation or server is used.
 
 ## Attribution and license
 

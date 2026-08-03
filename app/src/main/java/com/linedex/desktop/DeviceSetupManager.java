@@ -27,10 +27,6 @@ final class DeviceSetupManager {
             NubiaDesktopPropertyManager.Property.DEVICE_RESTRICTIONS.key;
     private static final String ROUNDED_CORNERS_PROPERTY =
             NubiaDesktopPropertyManager.Property.ROUNDED_CORNERS.key;
-    private static final String VERIFIED_NX809J_FINGERPRINT =
-            "REDMAGIC/NX809J-EEA/NX809J:16/"
-                    + "BQ2A.250705.001-BP2A.250605.031.A3/"
-                    + "20260204.221845:user/release-keys";
 
     private static final String ITEM_FREEFORM = "freeform";
     private static final String ITEM_RESIZABLE = "resizable";
@@ -49,22 +45,25 @@ final class DeviceSetupManager {
 
     static Audit audit(final Context context, final SessionProfile sessionProfile) {
         final boolean compatibleDevice = Build.VERSION.SDK_INT >= 36;
-        final boolean verifiedDevice = compatibleDevice;
+        final boolean verifiedDevice = compatibleDevice
+                && ("NX769J".equalsIgnoreCase(Build.DEVICE)
+                        || "NX769J".equalsIgnoreCase(Build.MODEL)
+                        || "tiro".equalsIgnoreCase(Build.DEVICE));
         final SharedPreferences preferences = preferences(context);
 
         Map<String, String> values = readUnprivilegedValues(context);
         String runtimeError = "";
         boolean shellReady = false;
-        int shizukuUid = -1;
+        int rootUid = -1;
         ShellAccess.Snapshot shellState = ShellAccess.refresh();
         runtimeError = shellState.error;
         if (shellState.isReady()) {
             try {
                 final int serviceUid = ShellAccess.connectAndGetUid();
-                shizukuUid = serviceUid;
-                if (serviceUid != ShellAccess.SHELL_UID) {
+                rootUid = serviceUid;
+                if (serviceUid != ShellAccess.ROOT_UID) {
                     throw new IOException(
-                            "Shizuku must run as shell UID 2000; found UID "
+                            "Root backend must run as UID 0; found UID "
                                     + serviceUid);
                 }
                 values = parseValues(ShellAccess.run(buildAuditCommand()));
@@ -83,7 +82,7 @@ final class DeviceSetupManager {
                         shellState.installed,
                         true,
                         true,
-                        shizukuUid,
+                        rootUid,
                         shellState.version,
                         runtimeError);
             }
@@ -118,8 +117,8 @@ final class DeviceSetupManager {
         }
         if (!shellReady) {
             CompatibilityDiagnostics.record(
-                    "SHIZUKU-001",
-                    "Shizuku runtime is unavailable",
+                    "ROOT-001",
+                    "Root command backend is unavailable",
                     runtimeError);
         }
 
@@ -154,7 +153,7 @@ final class DeviceSetupManager {
         final Audit before = audit(context, sessionProfile);
         if (!before.shellReady) {
             throw new IOException(
-                    "running Shizuku shell access is required");
+                    "root access is required");
         }
         if (!before.compatibleDevice) {
             throw new IOException(
@@ -181,7 +180,7 @@ final class DeviceSetupManager {
                 before.resizableValue,
                 before.resizableEnabled);
         if (!originals.commit()) {
-            throw new IOException("could not save Shizuku setup state");
+            throw new IOException("could not save root setup state");
         }
         if (!commands.isEmpty()) {
             ShellAccess.run(joinCommands(commands));
@@ -189,7 +188,7 @@ final class DeviceSetupManager {
         final Audit after = audit(context, sessionProfile);
         if (!after.configurationReady) {
             throw new IOException(
-                    "Shizuku setup could not fully provision desktop windowing");
+                    "Root setup could not fully provision desktop windowing");
         }
         return audit(context, sessionProfile);
     }
@@ -200,7 +199,7 @@ final class DeviceSetupManager {
         final Audit before = audit(context, sessionProfile);
         if (!before.shellReady) {
             throw new IOException(
-                    "running Shizuku shell access is required");
+                    "root access is required");
         }
         final SharedPreferences preferences = preferences(context);
         final List<String> commands = new ArrayList<>();
@@ -219,7 +218,7 @@ final class DeviceSetupManager {
         editor.remove(KEY_PENDING_BOOT_ID);
         if (!editor.commit()) {
             throw new IOException(
-                    "could not save restored Shizuku setup state");
+                    "could not save restored root setup state");
         }
         return audit(context, sessionProfile);
     }
