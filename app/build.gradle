@@ -1,0 +1,123 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace = 'com.linedex.desktop'
+    compileSdk = 37
+
+    defaultConfig {
+        applicationId = 'com.linedex.desktop'
+        minSdk = 36
+        targetSdk = 36
+        versionCode = 1
+        versionName = '0.1.0-alpha01'
+    }
+
+    buildFeatures {
+        aidl = true
+        buildConfig = true
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    packagingOptions {
+        jniLibs {
+            // Shell launches the extracted helpers from nativeLibraryDir.
+            useLegacyPackaging = true
+            keepDebugSymbols += [
+                    '**/libmagicdesk_uinput_bridge.so',
+                    '**/libmagicdesk_keyboard_bridge.so'
+            ]
+        }
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDir file("$buildDir/generated/magicdeskNative")
+        }
+    }
+}
+
+def termuxPrefix = System.getenv('PREFIX') ?: '/data/data/com.termux/files/usr'
+def termuxCompiler = file("${termuxPrefix}/bin/clang")
+def uinputBridgeSource = rootProject.file('native/magicdesk_uinput_bridge.c')
+def uinputBridgeOutput = file(
+        "$buildDir/generated/magicdeskNative/arm64-v8a/libmagicdesk_uinput_bridge.so")
+def keyboardBridgeSource =
+        rootProject.file('native/magicdesk_keyboard_bridge.c')
+def keyboardBridgeOutput = file(
+        "$buildDir/generated/magicdeskNative/arm64-v8a/libmagicdesk_keyboard_bridge.so")
+def resolveNativeCompilerCommand = {
+    if (termuxCompiler.isFile()
+            && termuxPrefix.startsWith('/data/data/com.termux/')) {
+        return [termuxCompiler.absolutePath]
+    }
+    def ndkHome = System.getenv('ANDROID_NDK_HOME')
+            ?: System.getenv('ANDROID_NDK_ROOT')
+    if (ndkHome == null || ndkHome.isBlank()) {
+        throw new GradleException(
+                'ANDROID_NDK_HOME is required to build the input helpers')
+    }
+    def ndkCompiler = file("${ndkHome}/toolchains/llvm/prebuilt/linux-x86_64"
+            + '/bin/aarch64-linux-android36-clang')
+    if (!ndkCompiler.isFile()) {
+        throw new GradleException("Android NDK compiler not found: ${ndkCompiler}")
+    }
+    return [ndkCompiler.absolutePath]
+}
+
+tasks.register('buildMagicDeskUinputBridge', Exec) {
+    inputs.file(uinputBridgeSource)
+    outputs.file(uinputBridgeOutput)
+    doFirst {
+        uinputBridgeOutput.parentFile.mkdirs()
+        def compilerCommand = resolveNativeCompilerCommand()
+        compilerCommand.addAll([
+                '-D_GNU_SOURCE', '-std=c17', '-O2', '-Wall', '-Wextra', '-Werror',
+                '-fPIE', '-pie', '-Wl,-z,noexecstack',
+                '-o', uinputBridgeOutput.absolutePath,
+                uinputBridgeSource.absolutePath
+        ])
+        commandLine compilerCommand
+    }
+}
+
+tasks.register('buildMagicDeskKeyboardBridge', Exec) {
+    inputs.file(keyboardBridgeSource)
+    outputs.file(keyboardBridgeOutput)
+    doFirst {
+        keyboardBridgeOutput.parentFile.mkdirs()
+        def compilerCommand = resolveNativeCompilerCommand()
+        compilerCommand.addAll([
+                '-D_GNU_SOURCE', '-std=c17', '-O2', '-Wall', '-Wextra', '-Werror',
+                '-fPIE', '-pie', '-Wl,-z,noexecstack',
+                '-o', keyboardBridgeOutput.absolutePath,
+                keyboardBridgeSource.absolutePath
+        ])
+        commandLine compilerCommand
+    }
+}
+
+tasks.named('preBuild').configure {
+    dependsOn tasks.named('buildMagicDeskUinputBridge')
+    dependsOn tasks.named('buildMagicDeskKeyboardBridge')
+}
+
+dependencies {
+    compileOnly 'androidx.annotation:annotation:1.3.0'
+    implementation('dev.rikka.shizuku:api:13.1.5') {
+        exclude group: 'androidx.annotation', module: 'annotation'
+    }
+    implementation('dev.rikka.shizuku:provider:13.1.5') {
+        exclude group: 'androidx.annotation', module: 'annotation'
+    }
+    compileOnly project(':hidden-api-stubs')
+    compileOnly project(':xposed-api-stubs')
+    testImplementation 'junit:junit:4.13.2'
+}
+
+apply from: rootProject.file('gradle/linedex-signing.gradle')

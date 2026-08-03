@@ -1,0 +1,691 @@
+package com.linedex.desktop;
+
+import android.os.LocaleList;
+import android.icu.util.ULocale;
+import android.util.Base64;
+import android.view.InputDevice;
+import android.view.inputmethod.InputMethodInfo;
+import android.view.inputmethod.InputMethodSubtype;
+
+import java.lang.reflect.Array;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+
+public final class HardwareKeyboardLayoutCommand {
+    private static final String INPUT_METHOD_SERVICE = "input_method";
+    private static final String KEYBOARD_SUBTYPE_MODE = "keyboard";
+    private static final String MAGICDESK_VIRTUAL_KEYBOARD_NAME =
+            "MagicDesk Keyboard";
+    private static final String MAGICDESK_VIRTUAL_KEYBOARD_PREFIX =
+            MAGICDESK_VIRTUAL_KEYBOARD_NAME + " ";
+
+    private HardwareKeyboardLayoutCommand() {
+    }
+
+    public static void main(final String[] args) {
+        if ((args.length < 1 || args.length > 2)
+                || !("next".equals(args[0])
+                        || "sync".equals(args[0])
+                        || "catalog".equals(args[0]))) {
+            System.err.println(
+                    "usage: HardwareKeyboardLayoutCommand <next|sync|catalog>"
+                            + " [current-descriptor]");
+            System.exit(64);
+            return;
+        }
+
+        try {
+            System.out.print(execute(
+                    args[0], args.length >= 2 ? args[1] : null).format());
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            e.printStackTrace(System.err);
+            System.exit(1);
+        }
+    }
+
+    static Result execute(
+            final String mode,
+            final String persistedCurrent)
+            throws ReflectiveOperationException {
+        if (!"next".equals(mode)
+                && !"sync".equals(mode)
+                && !"catalog".equals(mode)) {
+            throw new IllegalArgumentException("unsupported mode: " + mode);
+        }
+        final List<InputDevice> physicalKeyboards =
+                getExternalAlphabeticKeyboards();
+        if (physicalKeyboards.isEmpty()) {
+            throw new IllegalStateException(
+                    "no external alphabetic keyboard found");
+        }
+        final Object inputManager = getInputManagerService();
+        final Class<?> inputManagerInterface =
+                Class.forName("android.hardware.input.IInputManager");
+        final Class<?> keyboardLayoutClass =
+                Class.forName("android.hardware.input.KeyboardLayout");
+        final Method getKeyboardLayout = inputManagerInterface.getMethod(
+                "getKeyboardLayout", String.class);
+        final ImeState imeState = getImeState();
+        final List<LayoutInfo> layouts = resolveConfiguredLayouts(
+                inputManager, inputManagerInterface, getKeyboardLayout,
+                keyboardLayoutClass, physicalKeyboards.get(0), imeState);
+        if (layouts.isEmpty()) {
+            throw new IllegalStateException(
+                    "no configured hardware keyboard layouts found");
+        }
+
+        final int subtypeIndex =
+                findSubtypeIndex(layouts, imeState.currentSubtype);
+        final int persistedIndex =
+                findCurrentIndex(layouts, persistedCurrent);
+        final int baseIndex = persistedIndex >= 0
+                ? persistedIndex : Math.max(0, subtypeIndex);
+        final int selectedIndex = "next".equals(mode)
+                ? (baseIndex + 1) % layouts.size()
+                : baseIndex;
+        final LayoutInfo selected = layouts.get(selectedIndex);
+        final List<IndexedKeyboard> virtualKeyboards =
+                getIndexedVirtualKeyboards();
+        final int deviceCount;
+        if ("catalog".equals(mode)) {
+            deviceCount = virtualKeyboards.size();
+        } else if (!virtualKeyboards.isEmpty()) {
+            if (virtualKeyboards.size() != layouts.size()) {
+                throw new IllegalStateException(
+                        "virtual keyboard count "
+                                + virtualKeyboards.size()
+                                + " does not match layout count "
+                                + layouts.size());
+            }
+            if ("sync".equals(mode)) {
+                for (int index = 0; index < layouts.size(); index++) {
+                    setKeyboardLayout(
+                            inputManager,
+                            inputManagerInterface,
+                            virtualKeyboards.get(index).device,
+                            imeState.inputMethod,
+                            layouts.get(index),
+                            false);
+                }
+            }
+            deviceCount = virtualKeyboards.size();
+        } else {
+            for (final InputDevice keyboard : physicalKeyboards) {
+                setKeyboardLayout(
+                        inputManager,
+                        inputManagerInterface,
+                        keyboard,
+                        imeState.inputMethod,
+                        selected,
+                        true);
+            }
+            deviceCount = physicalKeyboards.size();
+        }
+
+        return new Result(
+                selected.descriptor,
+                compactCode(layouts, selectedIndex),
+                selected.label,
+                selectedIndex,
+                deviceCount,
+                physicalKeyboards.size(),
+                layouts.size(),
+                imeState.imeId);
+    }
+
+    private static List<LayoutInfo> resolveConfiguredLayouts(
+            final Object inputManager,
+            final Class<?> inputManagerInterface,
+            final Method getKeyboardLayout,
+            final Class<?> keyboardLayoutClass,
+            final InputDevice keyboard,
+            final ImeState imeState) throws ReflectiveOperationException {
+        final Method getDescriptor =
+                keyboardLayoutClass.getMethod("getDescriptor");
+        final Method getLabel =
+                keyboardLayoutClass.getMethod("getLabel");
+        final Method getLocales =
+                keyboardLayoutClass.getMethod("getLocales");
+        final Method getLayoutType =
+                keyboardLayoutClass.getMethod("getLayoutType");
+        final Class<?> identifierClass =
+                Class.forName("android.hardware.input.InputDeviceIdentifier");
+        final Object identifier = InputDevice.class
+                .getMethod("getIdentifier").invoke(keyboard);
+        final Method getLayoutList = inputManagerInterface.getMethod(
+                "getKeyboardLayoutListForInputDevice",
+                identifierClass,
+                int.class,
+                InputMethodInfo.class,
+                InputMethodSubtype.class);
+
+        final List<LayoutInfo> layouts = new ArrayList<>();
+        for (final ImeSubtypeState mapping : imeState.layoutMappings) {
+            final Object candidates = getLayoutList.invoke(
+                    inputManager,
+                    identifier,
+                    0,
+                    mapping.inputMethod,
+                    mapping.subtype);
+            final List<ResolvedLayout> resolvedLayouts =
+                    new ArrayList<>();
+            for (int index = 0;
+                    candidates != null
+                            && index < Array.getLength(candidates);
+                    index++) {
+                final Object candidate = Array.get(candidates, index);
+                resolvedLayouts.add(new ResolvedLayout(
+                        (String) getDescriptor.invoke(candidate),
+                        (String) getLabel.invoke(candidate),
+                        (LocaleList) getLocales.invoke(candidate),
+                        (String) getLayoutType.invoke(candidate)));
+            }
+            ResolvedLayout resolved = findBestLayout(
+                    resolvedLayouts,
+                    localeOf(mapping.subtype),
+                    mapping.subtype
+                            .getPhysicalKeyboardHintLayoutType());
+            if (resolved == null) {
+                final String configuredDescriptor =
+                        getSelectedLayoutDescriptor(
+                                inputManager,
+                                inputManagerInterface,
+                                keyboard,
+                                mapping.inputMethod,
+                                mapping.subtype);
+                resolved = findResolvedLayout(
+                        resolvedLayouts, configuredDescriptor);
+            }
+            if (resolved == null) {
+                continue;
+            }
+            layouts.add(new LayoutInfo(
+                    resolved.descriptor,
+                    resolved.label,
+                    preferredLocale(
+                            mapping.subtype, resolved.locales),
+                    mapping.subtype));
+        }
+        return layouts;
+    }
+
+    private static ResolvedLayout findResolvedLayout(
+            final List<ResolvedLayout> layouts,
+            final String descriptor) {
+        if (descriptor == null) {
+            return null;
+        }
+        for (final ResolvedLayout layout : layouts) {
+            if (descriptor.equals(layout.descriptor)) {
+                return layout;
+            }
+        }
+        return null;
+    }
+
+    private static ResolvedLayout findBestLayout(
+            final List<ResolvedLayout> layouts,
+            final Locale subtypeLocale,
+            final String subtypeLayoutType) {
+        if (subtypeLocale == null
+                || subtypeLocale.getLanguage().isEmpty()) {
+            return null;
+        }
+        ResolvedLayout best = null;
+        int bestScore = -1;
+        for (final ResolvedLayout layout : layouts) {
+            for (int index = 0; index < layout.locales.size(); index++) {
+                final Locale layoutLocale = layout.locales.get(index);
+                if (!subtypeLocale.getLanguage().equals(
+                        layoutLocale.getLanguage())) {
+                    continue;
+                }
+                int score = 1;
+                if (!subtypeLocale.getCountry().isEmpty()
+                        && subtypeLocale.getCountry().equals(
+                                layoutLocale.getCountry())) {
+                    score += 2;
+                }
+                if (subtypeLayoutType != null
+                        && !subtypeLayoutType.isEmpty()
+                        && subtypeLayoutType.equals(
+                                layout.layoutType)) {
+                    score++;
+                }
+                if (score > bestScore) {
+                    best = layout;
+                    bestScore = score;
+                }
+            }
+        }
+        return best;
+    }
+
+    private static String getSelectedLayoutDescriptor(
+            final Object inputManager,
+            final Class<?> inputManagerInterface,
+            final InputDevice keyboard,
+            final InputMethodInfo inputMethod,
+            final InputMethodSubtype subtype) throws ReflectiveOperationException {
+        final Class<?> identifierClass =
+                Class.forName("android.hardware.input.InputDeviceIdentifier");
+        final Object identifier = InputDevice.class.getMethod("getIdentifier")
+                .invoke(keyboard);
+        final Object selection = inputManagerInterface.getMethod(
+                "getKeyboardLayoutForInputDevice",
+                identifierClass, int.class, InputMethodInfo.class,
+                InputMethodSubtype.class)
+                .invoke(inputManager, identifier, 0,
+                        inputMethod, subtype);
+        return selection == null ? null
+                : (String) selection.getClass()
+                        .getMethod("getLayoutDescriptor").invoke(selection);
+    }
+
+    private static List<InputDevice> getExternalAlphabeticKeyboards() {
+        final List<InputDevice> keyboards = new ArrayList<>();
+        for (final int deviceId : InputDevice.getDeviceIds()) {
+            final InputDevice device = InputDevice.getDevice(deviceId);
+            if (isExternalAlphabeticKeyboard(device)) {
+                keyboards.add(device);
+            }
+        }
+        return keyboards;
+    }
+
+    private static boolean isExternalAlphabeticKeyboard(final InputDevice device) {
+        if (device == null
+                || device.isVirtual()
+                || !device.isExternal()
+                || isMagicDeskVirtualKeyboard(device)) {
+            return false;
+        }
+        final boolean hasKeyboardSource =
+                (device.getSources() & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD;
+        return hasKeyboardSource
+                && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC;
+    }
+
+    private static List<IndexedKeyboard> getIndexedVirtualKeyboards() {
+        final List<IndexedKeyboard> keyboards = new ArrayList<>();
+        for (final int deviceId : InputDevice.getDeviceIds()) {
+            final InputDevice device = InputDevice.getDevice(deviceId);
+            final int index = virtualKeyboardIndex(device);
+            if (index >= 0) {
+                keyboards.add(new IndexedKeyboard(index, device));
+            }
+        }
+        keyboards.sort(Comparator.comparingInt(value -> value.index));
+        for (int index = 0; index < keyboards.size(); index++) {
+            if (keyboards.get(index).index != index) {
+                throw new IllegalStateException(
+                        "missing MagicDesk virtual keyboard " + index);
+            }
+        }
+        return keyboards;
+    }
+
+    private static boolean isMagicDeskVirtualKeyboard(
+            final InputDevice device) {
+        if (device == null) {
+            return false;
+        }
+        final String name = device.getName();
+        return name.startsWith(MAGICDESK_VIRTUAL_KEYBOARD_PREFIX)
+                && (device.getSources() & InputDevice.SOURCE_KEYBOARD)
+                        == InputDevice.SOURCE_KEYBOARD;
+    }
+
+    private static int virtualKeyboardIndex(final InputDevice device) {
+        if (!isMagicDeskVirtualKeyboard(device)) {
+            return -1;
+        }
+        final String name = device.getName();
+        if (!name.startsWith(MAGICDESK_VIRTUAL_KEYBOARD_PREFIX)) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(
+                    name.substring(
+                            MAGICDESK_VIRTUAL_KEYBOARD_PREFIX.length()));
+        } catch (NumberFormatException error) {
+            return -1;
+        }
+    }
+
+    private static Object getInputManagerService() throws ReflectiveOperationException {
+        return getService("input", "android.hardware.input.IInputManager");
+    }
+
+    private static Object getService(
+            final String serviceName,
+            final String interfaceName) throws ReflectiveOperationException {
+        final Class<?> serviceManager = Class.forName("android.os.ServiceManager");
+        final Object binder = serviceManager.getMethod("getService", String.class)
+                .invoke(null, serviceName);
+        final Class<?> stub = Class.forName(interfaceName + "$Stub");
+        return stub.getMethod("asInterface", Class.forName("android.os.IBinder"))
+                .invoke(null, binder);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ImeState getImeState() throws ReflectiveOperationException {
+        final String interfaceName = "com.android.internal.view.IInputMethodManager";
+        final Object inputMethodManager = getService(INPUT_METHOD_SERVICE, interfaceName);
+        final Class<?> inputMethodManagerInterface = Class.forName(interfaceName);
+        final int userId = 0;
+        final InputMethodInfo inputMethod = (InputMethodInfo) inputMethodManagerInterface.getMethod(
+                "getCurrentInputMethodInfoAsUser", int.class)
+                .invoke(inputMethodManager, userId);
+        final InputMethodSubtype currentSubtype =
+                (InputMethodSubtype) inputMethodManagerInterface.getMethod(
+                        "getCurrentInputMethodSubtype", int.class)
+                        .invoke(inputMethodManager, userId);
+        if (inputMethod == null || currentSubtype == null) {
+            throw new IllegalStateException("current input method or subtype is unavailable");
+        }
+
+        final List<ImeSubtypeState> layoutMappings = new ArrayList<>();
+        final Set<String> seenMappings = new LinkedHashSet<>();
+        final List<InputMethodSubtype> enabledSubtypes =
+                (List<InputMethodSubtype>) inputMethodManagerInterface.getMethod(
+                        "getEnabledInputMethodSubtypeList",
+                        String.class, boolean.class, int.class)
+                        .invoke(inputMethodManager,
+                                inputMethod.getId(), true, userId);
+        for (final InputMethodSubtype subtype : enabledSubtypes) {
+            final String mappingKey = inputMethod.getId()
+                    + ':' + (subtype == null ? 0 : subtype.hashCode());
+            if (subtype == null
+                    || !KEYBOARD_SUBTYPE_MODE.equals(subtype.getMode())
+                    || !seenMappings.add(mappingKey)) {
+                continue;
+            }
+            layoutMappings.add(
+                    new ImeSubtypeState(inputMethod, subtype));
+        }
+        final String currentMappingKey =
+                inputMethod.getId() + ':' + currentSubtype.hashCode();
+        if (seenMappings.add(currentMappingKey)) {
+            layoutMappings.add(
+                    new ImeSubtypeState(inputMethod, currentSubtype));
+        }
+        return new ImeState(inputMethod, currentSubtype, layoutMappings);
+    }
+
+    private static void setKeyboardLayout(
+            final Object inputManager,
+            final Class<?> inputManagerInterface,
+            final InputDevice keyboard,
+            final InputMethodInfo inputMethod,
+            final LayoutInfo selected,
+            final boolean verify) throws ReflectiveOperationException {
+        final Class<?> identifierClass =
+                Class.forName("android.hardware.input.InputDeviceIdentifier");
+        final Method getIdentifier = InputDevice.class.getMethod("getIdentifier");
+        final Method setOverride = inputManagerInterface.getMethod(
+                "setKeyboardLayoutOverrideForInputDevice",
+                identifierClass, String.class);
+        final Method setLayout = inputManagerInterface.getMethod(
+                "setKeyboardLayoutForInputDevice",
+                identifierClass, int.class, InputMethodInfo.class,
+                InputMethodSubtype.class, String.class);
+        final Method getLayout = inputManagerInterface.getMethod(
+                "getKeyboardLayoutForInputDevice",
+                identifierClass, int.class, InputMethodInfo.class,
+                InputMethodSubtype.class);
+        final Object identifier = getIdentifier.invoke(keyboard);
+        Object selection = getLayout.invoke(inputManager, identifier, 0,
+                inputMethod, selected.subtype);
+        String applied = selection == null ? null
+                : (String) selection.getClass()
+                        .getMethod("getLayoutDescriptor").invoke(selection);
+        if (verify && selected.descriptor.equals(applied)) {
+            return;
+        }
+        setOverride.invoke(inputManager, identifier, selected.descriptor);
+        setLayout.invoke(inputManager, identifier, 0,
+                inputMethod, selected.subtype, selected.descriptor);
+        if (!verify) {
+            return;
+        }
+        selection = getLayout.invoke(inputManager, identifier, 0,
+                inputMethod, selected.subtype);
+        applied = selection == null ? null
+                : (String) selection.getClass()
+                        .getMethod("getLayoutDescriptor").invoke(selection);
+        if (!selected.descriptor.equals(applied)) {
+            throw new IllegalStateException(
+                    "keyboard layout did not change to "
+                            + selected.descriptor);
+        }
+    }
+
+    private static int findSubtypeIndex(
+            final List<LayoutInfo> layouts,
+            final InputMethodSubtype currentSubtype) {
+        for (int index = 0; index < layouts.size(); index++) {
+            if (layouts.get(index).subtype.equals(currentSubtype)) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private static int findCurrentIndex(final List<LayoutInfo> layouts, final String current) {
+        if (current == null || current.isEmpty() || "null".equals(current)) {
+            return -1;
+        }
+        for (int index = 0; index < layouts.size(); index++) {
+            final String descriptor = layouts.get(index).descriptor;
+            if (descriptor.equals(current)) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private static Locale localeOf(final InputMethodSubtype subtype) {
+        final String languageTag = subtype.getLanguageTag();
+        if (languageTag != null && !languageTag.isEmpty()) {
+            return Locale.forLanguageTag(languageTag);
+        }
+        final String locale = subtype.getLocale();
+        if (locale != null && !locale.isEmpty()) {
+            return Locale.forLanguageTag(locale.replace('_', '-'));
+        }
+        final ULocale physicalLanguage =
+                subtype.getPhysicalKeyboardHintLanguageTag();
+        return physicalLanguage == null
+                ? null : physicalLanguage.toLocale();
+    }
+
+    private static Locale firstLocale(final LocaleList locales) {
+        return locales == null || locales.isEmpty() ? null : locales.get(0);
+    }
+
+    private static Locale preferredLocale(
+            final InputMethodSubtype subtype,
+            final LocaleList layoutLocales) {
+        final Locale subtypeLocale = localeOf(subtype);
+        return subtypeLocale == null
+                ? firstLocale(layoutLocales) : subtypeLocale;
+    }
+
+    private static String compactCode(final List<LayoutInfo> layouts, final int selectedIndex) {
+        final LayoutInfo selected = layouts.get(selectedIndex);
+        final String language = languageCode(selected.locale);
+        int matchingLanguages = 0;
+        for (final LayoutInfo layout : layouts) {
+            if (language.equals(languageCode(layout.locale))) {
+                matchingLanguages++;
+            }
+        }
+        if (matchingLanguages <= 1) {
+            return language;
+        }
+
+        final String country = selected.locale == null
+                ? "" : selected.locale.getCountry().toUpperCase(Locale.ROOT);
+        final String regionalCode = country.isEmpty() ? language : language + "-" + country;
+        int matchingRegionalCodes = 0;
+        for (final LayoutInfo layout : layouts) {
+            final String layoutLanguage = languageCode(layout.locale);
+            final String layoutCountry = layout.locale == null
+                    ? "" : layout.locale.getCountry().toUpperCase(Locale.ROOT);
+            final String layoutRegionalCode = layoutCountry.isEmpty()
+                    ? layoutLanguage : layoutLanguage + "-" + layoutCountry;
+            if (regionalCode.equals(layoutRegionalCode)) {
+                matchingRegionalCodes++;
+            }
+        }
+        if (matchingRegionalCodes <= 1) {
+            return regionalCode;
+        }
+        int variantIndex = 0;
+        for (int index = 0; index <= selectedIndex; index++) {
+            final LayoutInfo layout = layouts.get(index);
+            final String layoutLanguage = languageCode(layout.locale);
+            final String layoutCountry = layout.locale == null
+                    ? "" : layout.locale.getCountry().toUpperCase(Locale.ROOT);
+            final String layoutRegionalCode = layoutCountry.isEmpty()
+                    ? layoutLanguage : layoutLanguage + "-" + layoutCountry;
+            if (regionalCode.equals(layoutRegionalCode)) {
+                variantIndex++;
+            }
+        }
+        return regionalCode + "-" + variantIndex;
+    }
+
+    private static String languageCode(final Locale locale) {
+        if (locale == null || locale.getLanguage().isEmpty()) {
+            return "??";
+        }
+        return locale.getLanguage().toUpperCase(Locale.ROOT);
+    }
+
+    static final class Result {
+        final String descriptor;
+        final String code;
+        final String name;
+        final int index;
+        final int devices;
+        final int physicalDevices;
+        final int layouts;
+        final String imeId;
+
+        Result(
+                final String descriptor,
+                final String code,
+                final String name,
+                final int index,
+                final int devices,
+                final int physicalDevices,
+                final int layouts,
+                final String imeId) {
+            this.descriptor = descriptor;
+            this.code = code;
+            this.name = name;
+            this.index = index;
+            this.devices = devices;
+            this.physicalDevices = physicalDevices;
+            this.layouts = layouts;
+            this.imeId = imeId;
+        }
+
+        String format() {
+            return "descriptor=" + descriptor + '\n'
+                    + "code=" + code + '\n'
+                    + "index=" + index + '\n'
+                    + "name64=" + Base64.encodeToString(
+                            name.getBytes(StandardCharsets.UTF_8),
+                            Base64.NO_WRAP) + '\n'
+                    + "devices=" + devices + '\n'
+                    + "physicalDevices=" + physicalDevices + '\n'
+                    + "layouts=" + layouts + '\n'
+                    + "ime=" + imeId + '\n';
+        }
+    }
+
+    private static final class IndexedKeyboard {
+        final int index;
+        final InputDevice device;
+
+        IndexedKeyboard(final int index, final InputDevice device) {
+            this.index = index;
+            this.device = device;
+        }
+    }
+
+    private static final class LayoutInfo {
+        final String descriptor;
+        final String label;
+        final Locale locale;
+        final InputMethodSubtype subtype;
+
+        LayoutInfo(
+                final String descriptor,
+                final String label,
+                final Locale locale,
+                final InputMethodSubtype subtype) {
+            this.descriptor = descriptor;
+            this.label = label == null || label.isEmpty() ? descriptor : label;
+            this.locale = locale;
+            this.subtype = subtype;
+        }
+    }
+
+    private static final class ResolvedLayout {
+        final String descriptor;
+        final String label;
+        final LocaleList locales;
+        final String layoutType;
+
+        ResolvedLayout(
+                final String descriptor,
+                final String label,
+                final LocaleList locales,
+                final String layoutType) {
+            this.descriptor = descriptor;
+            this.label = label;
+            this.locales = locales == null
+                    ? LocaleList.getEmptyLocaleList() : locales;
+            this.layoutType = layoutType;
+        }
+    }
+
+    private static final class ImeState {
+        final InputMethodInfo inputMethod;
+        final String imeId;
+        final InputMethodSubtype currentSubtype;
+        final List<ImeSubtypeState> layoutMappings;
+
+        ImeState(
+                final InputMethodInfo inputMethod,
+                final InputMethodSubtype currentSubtype,
+                final List<ImeSubtypeState> layoutMappings) {
+            this.inputMethod = inputMethod;
+            this.imeId = inputMethod.getId();
+            this.currentSubtype = currentSubtype;
+            this.layoutMappings = layoutMappings;
+        }
+    }
+
+    private static final class ImeSubtypeState {
+        final InputMethodInfo inputMethod;
+        final InputMethodSubtype subtype;
+
+        ImeSubtypeState(
+                final InputMethodInfo inputMethod,
+                final InputMethodSubtype subtype) {
+            this.inputMethod = inputMethod;
+            this.subtype = subtype;
+        }
+    }
+}

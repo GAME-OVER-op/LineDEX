@@ -1,0 +1,12 @@
+LineDEX
+
+This project contains substantial code derived from MagicDesk:
+https://github.com/mekhontsev/magicdesk
+
+Original copyright:
+Copyright (c) 2026 Ilya Mekhontsev
+
+MagicDesk is licensed under the MIT License. LineDEX preserves the original
+license and attribution. LineDEX-specific modifications add a LineageOS/AOSP
+external-display backend, LSPosed hooks, Binder IPC, project branding and build
+workflows.

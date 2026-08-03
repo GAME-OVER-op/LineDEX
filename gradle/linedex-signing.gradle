@@ -1,0 +1,68 @@
+def readSigning = { String prefix ->
+    def storeFileValue = providers.gradleProperty("${prefix}_STORE_FILE").orNull
+    def storePasswordValue = providers.gradleProperty("${prefix}_STORE_PASSWORD").orNull
+    def keyAliasValue = providers.gradleProperty("${prefix}_KEY_ALIAS").orNull
+    def keyPasswordValue = providers.gradleProperty("${prefix}_KEY_PASSWORD").orNull
+    def values = [storeFileValue, storePasswordValue, keyAliasValue, keyPasswordValue]
+    def any = values.any { it != null }
+    def all = values.every { it != null }
+    if (any && !all) {
+        throw new GradleException("All four ${prefix}_* signing properties are required")
+    }
+    return [configured: all, storeFile: storeFileValue,
+            storePassword: storePasswordValue, keyAlias: keyAliasValue,
+            keyPassword: keyPasswordValue]
+}
+
+def devSigning = readSigning('LINEDEX_DEV')
+def releaseSigning = readSigning('LINEDEX_RELEASE')
+
+android {
+    signingConfigs {
+        lineDexDev {
+            if (devSigning.configured) {
+                storeFile = file(devSigning.storeFile)
+                storePassword = devSigning.storePassword
+                keyAlias = devSigning.keyAlias
+                keyPassword = devSigning.keyPassword
+            }
+        }
+        lineDexRelease {
+            if (releaseSigning.configured) {
+                storeFile = file(releaseSigning.storeFile)
+                storePassword = releaseSigning.storePassword
+                keyAlias = releaseSigning.keyAlias
+                keyPassword = releaseSigning.keyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix = '.debug'
+            versionNameSuffix = '-debug'
+        }
+        devRelease {
+            initWith release
+            debuggable = false
+            minifyEnabled = false
+            shrinkResources = false
+            matchingFallbacks = ['release']
+            if (devSigning.configured) {
+                signingConfig = signingConfigs.lineDexDev
+            } else {
+                // Out-of-box GitHub builds: release code signed with the
+                // runner's debug key. Configure LINEDEX_DEV_* for updates.
+                signingConfig = signingConfigs.debug
+            }
+        }
+        release {
+            debuggable = false
+            minifyEnabled = false
+            shrinkResources = false
+            if (releaseSigning.configured) {
+                signingConfig = signingConfigs.lineDexRelease
+            }
+        }
+    }
+}

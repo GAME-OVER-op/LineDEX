@@ -1,0 +1,66 @@
+name: Firmware compatibility problem
+description: Report a reproducible LineDEX failure on Android 16 or newer
+title: "[Compatibility] "
+labels:
+  - compatibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reproduce the problem, open **Diagnostics** in the phone control panel,
+        press **Refresh**, and attach the complete report below. Review it before publishing.
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: List the exact actions from a clean boot and disconnected monitor.
+      placeholder: |
+        1. Enable the LineDEX session ...
+        2. Connect ...
+        3. Open ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Include the on-screen LineDEX error code if one appeared.
+    validations:
+      required: true
+  - type: dropdown
+    id: baseline
+    attributes:
+      label: Behavior without LineDEX
+      options:
+        - The external display mirrors the phone
+        - The ROM already provides an extended desktop
+        - The external display is not detected
+        - Not tested
+    validations:
+      required: true
+  - type: textarea
+    id: firmware
+    attributes:
+      label: Firmware and Xposed environment
+      description: ROM name/build, Android version, device codename, LSPosed/Revenge Xposed version, and Shizuku version.
+    validations:
+      required: true
+  - type: textarea
+    id: peripherals
+    attributes:
+      label: External display and input devices
+      description: Monitor/glasses, keyboard, mouse, dock, adapters, cable, and reported display mode.
+  - type: textarea
+    id: report
+    attributes:
+      label: LineDEX diagnostics report
+      render: text
+      description: Paste the complete report from Diagnostics.
+    validations:
+      required: true

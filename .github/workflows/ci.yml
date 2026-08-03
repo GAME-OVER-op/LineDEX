@@ -1,0 +1,94 @@
+name: Android CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/29.0.14206865
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-37" \
+            "build-tools;37.0.0" \
+            "ndk;29.0.14206865"
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar"
+          test -x "$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2"
+          test -x "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android36-clang"
+
+      - name: Restore optional stable development keystore
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.LINEDEX_DEV_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.LINEDEX_DEV_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.LINEDEX_DEV_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.LINEDEX_DEV_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$KEYSTORE_BASE64" ]]; then
+            echo "No stable development key configured; using Gradle debug signing."
+            exit 0
+          fi
+          test -n "$STORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+          install -d -m 700 "$RUNNER_TEMP/linedex-signing"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode \
+            > "$RUNNER_TEMP/linedex-signing/dev.jks"
+          chmod 600 "$RUNNER_TEMP/linedex-signing/dev.jks"
+          install -d -m 700 "$HOME/.gradle"
+          {
+            printf 'LINEDEX_DEV_STORE_FILE=%s\n' "$RUNNER_TEMP/linedex-signing/dev.jks"
+            printf 'LINEDEX_DEV_STORE_PASSWORD=%s\n' "$STORE_PASSWORD"
+            printf 'LINEDEX_DEV_KEY_ALIAS=%s\n' "$KEY_ALIAS"
+            printf 'LINEDEX_DEV_KEY_PASSWORD=%s\n' "$KEY_PASSWORD"
+          } >> "$HOME/.gradle/gradle.properties"
+
+      - name: Unit tests, lint and dev release
+        run: |
+          ./gradlew --no-daemon \
+            :app:testDevReleaseUnitTest \
+            :app:lintDevRelease \
+            :app:assembleDevRelease
+
+      - name: Verify APK contents
+        run: |
+          ./scripts/verify-apks.sh \
+            app/build/outputs/apk/devRelease/app-devRelease.apk
+          unzip -p app/build/outputs/apk/devRelease/app-devRelease.apk \
+            assets/xposed_init \
+            | grep -qx 'com.linedex.desktop.xposed.LineDexXposedEntry'
+
+      - name: Upload dev release
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineDEX-devRelease
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            app/build/outputs/apk/devRelease/app-devRelease.apk
+            app/build/reports/lint-results-devRelease.html
